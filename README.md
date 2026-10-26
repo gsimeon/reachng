@@ -53,6 +53,15 @@ ReachNG is an enterprise location intelligence and digital postcode platform bui
 * Client-side webhook event simulator (`postcode.verified`, `location.created`, `address.flagged`) with HMAC signature header preview.
 * Server-side provider key isolation: NDAPS government API credentials never leak to client browsers.
 
+### 7. Pilot Readiness, Rate Limiting & Enterprise Observability
+* **Sliding Window Rate Limiter**: Enforces RFC-compliant rate limit quotas with standard headers (`RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`, `Retry-After`).
+  * Single Postcode Lookup: 60 req/min per client IP
+  * Batch Cleanse: 10 req/min per client IP (bulk payload defense)
+  * Location Mutations: 30 req/min per client IP
+* **Structured Audit Logging & Telemetry**: Emits structured JSON events (`postcode.lookup`, `postcode.batch`, `location.create`, `location.delete`, `rate_limit.exceeded`) with automated PII masking and deep secret/token redaction.
+* **Next.js Security Middleware**: Enforces strict HTTP security headers including `Content-Security-Policy` (CSP), `Strict-Transport-Security` (HSTS), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and distributed request tracing (`x-request-id`).
+* **Diagnostic Health Probe**: `GET /api/health` reports real-time subsystem readiness, process uptime, database RLS status, provider configuration mode, and rate limiter telemetry.
+
 ---
 
 ## Getting Started
