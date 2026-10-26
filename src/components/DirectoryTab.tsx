@@ -93,13 +93,13 @@ export function DirectoryTab({ onSaveLocation, onInspectPostcode }: DirectoryTab
               </h2>
             </div>
             <p className="mt-1 text-xs text-[var(--muted)]">
-              Browse all 36 Nigerian States and the FCT to look up or generate official NDAPS digital postcodes by administrative boundaries.
+              Browse reference postal models for Nigeria&apos;s 36 States and the FCT to test 11-character NDAPS postcode construction. Sample LGA models provide format prototypes; authoritative postal registration requires an active NDAPS provider.
             </p>
           </div>
 
           <div className="flex items-center gap-2">
             <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-800">
-              36 States + FCT Complete
+              36 States + FCT Reference Model
             </span>
           </div>
         </div>

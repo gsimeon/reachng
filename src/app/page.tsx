@@ -26,6 +26,7 @@ import { WorkspaceModal } from "@/components/WorkspaceModal";
 import { AuthModal } from "@/components/AuthModal";
 import { DispatchLabelModal } from "@/components/DispatchLabelModal";
 import { INITIAL_DEMO_LOCATIONS, type DefaultLocationItem } from "@/lib/nigeria-data";
+import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
 export default function Home() {
   const [activeNav, setActiveNav] = useState("Explorer");
@@ -49,13 +50,11 @@ export default function Home() {
 
   // Initialize and check health
   useEffect(() => {
-    // Load local storage preferences
+    // Load local workspace preference
     const savedWs = localStorage.getItem("reachng_workspace");
     if (savedWs) setWorkspaceName(savedWs);
 
-    const savedEmail = localStorage.getItem("reachng_user");
-    if (savedEmail) setUserEmail(savedEmail);
-
+    // Initial local fallback locations
     const savedLocs = localStorage.getItem("reachng_locations");
     if (savedLocs) {
       try {
@@ -82,6 +81,44 @@ export default function Home() {
       }
     }
     void checkHealth();
+
+    // Initialize Supabase auth session & real-time auth state listener
+    const supabase = createSupabaseBrowserClient();
+    if (supabase) {
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        if (session?.user?.email) {
+          setUserEmail(session.user.email);
+          void loadLocationsFromApi();
+        }
+      });
+
+      const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+        if (session?.user?.email) {
+          setUserEmail(session.user.email);
+          void loadLocationsFromApi();
+        } else {
+          setUserEmail(null);
+          const cached = localStorage.getItem("reachng_locations");
+          if (cached) {
+            try {
+              setLocations(JSON.parse(cached));
+            } catch {
+              setLocations(INITIAL_DEMO_LOCATIONS);
+            }
+          } else {
+            setLocations(INITIAL_DEMO_LOCATIONS);
+          }
+        }
+      });
+
+      return () => {
+        subscription.unsubscribe();
+      };
+    } else {
+      // Local fallback session
+      const savedEmail = localStorage.getItem("reachng_user");
+      if (savedEmail) setUserEmail(savedEmail);
+    }
   }, []);
 
   function handleSelectWorkspace(name: string) {
@@ -105,24 +142,26 @@ export default function Home() {
     address: string;
     category: string;
   }) {
-    // If Supabase is connected, try saving to API
-    if (supabaseConnected) {
-      try {
-        const response = await fetch("/api/locations", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(loc),
-        });
-        if (response.ok) {
-          await loadLocationsFromApi();
-          return;
-        }
-      } catch {
-        // Fallback to local storage
+    // If Supabase is connected and user is signed in, save strictly to cloud API
+    if (supabaseConnected && userEmail) {
+      const response = await fetch("/api/locations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(loc),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to persist location to Supabase database.");
       }
+      if (data.location) {
+        setLocations((prev) => [data.location, ...prev]);
+      } else {
+        await loadLocationsFromApi();
+      }
+      return;
     }
 
-    // Local storage fallback
+    // Local Demo Mode (Explicitly unpersisted browser cache)
     const newLocation: DefaultLocationItem = {
       id: `loc-custom-${Date.now()}`,
       label: loc.label,
@@ -138,14 +177,17 @@ export default function Home() {
   }
 
   async function handleDeleteLocation(id: string) {
-    if (supabaseConnected) {
-      try {
-        await fetch(`/api/locations?id=${id}`, { method: "DELETE" });
-      } catch {
-        // Continue to local cleanup
+    if (supabaseConnected && userEmail) {
+      const response = await fetch(`/api/locations?id=${id}`, { method: "DELETE" });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to delete location from Supabase database.");
       }
+      setLocations((prev) => prev.filter((l) => l.id !== id));
+      return;
     }
 
+    // Local Demo Mode
     const updated = locations.filter((l) => l.id !== id);
     setLocations(updated);
     localStorage.setItem("reachng_locations", JSON.stringify(updated));
@@ -156,13 +198,13 @@ export default function Home() {
       const response = await fetch("/api/locations");
       if (response.ok) {
         const data = await response.json();
-        if (data.locations && data.locations.length > 0) {
+        if (data.locations && Array.isArray(data.locations)) {
           setLocations(data.locations);
           localStorage.setItem("reachng_locations", JSON.stringify(data.locations));
         }
       }
     } catch {
-      // Use cached locations
+      // Keep local state if server unreachable
     }
   }
 
@@ -321,7 +363,7 @@ export default function Home() {
                   Every destination, within reach.
                 </h1>
                 <p className="mt-1.5 max-w-2xl text-xs sm:text-sm text-[var(--muted)] leading-relaxed">
-                  Verify 11-digit NDAPS digital postcodes, normalize merchant delivery points, and manage enterprise facilities across Nigeria&apos;s 36 states and the FCT.
+                  Verify 11-character alphanumeric NDAPS digital postcodes, normalize merchant delivery points, and manage enterprise facilities across Nigeria&apos;s 36 states and the FCT.
                 </p>
               </div>
 
@@ -377,6 +419,7 @@ export default function Home() {
                 onOpenAddModal={() => setIsAddModalOpen(true)}
                 onRefresh={loadLocationsFromApi}
                 supabaseConnected={supabaseConnected}
+                userEmail={userEmail}
                 onSeedDemoLocations={handleSeedDemoLocations}
                 onPrintLabel={(loc) => setPrintLabelLocation(loc)}
               />
@@ -397,7 +440,7 @@ export default function Home() {
                   <span>NDAPS Conformance Guard</span>
                 </span>
                 <span>·</span>
-                <span>36 States + FCT Complete Topology</span>
+                <span>36 States + FCT Reference Postal Topology</span>
               </div>
             </footer>
           </div>

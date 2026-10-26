@@ -22,6 +22,7 @@ interface LocationBookTabProps {
   onOpenAddModal: () => void;
   onRefresh: () => Promise<void>;
   supabaseConnected: boolean;
+  userEmail?: string | null;
   onSeedDemoLocations: () => void;
   onPrintLabel?: (location: DefaultLocationItem) => void;
 }
@@ -32,6 +33,7 @@ export function LocationBookTab({
   onOpenAddModal,
   onRefresh,
   supabaseConnected,
+  userEmail,
   onSeedDemoLocations,
   onPrintLabel,
 }: LocationBookTabProps) {
@@ -39,6 +41,7 @@ export function LocationBookTab({
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const categories = ["All", "Fulfilment Hub", "Retail Store", "Pickup Station", "Dispatch Office"];
 
@@ -61,8 +64,11 @@ export function LocationBookTab({
   async function handleDelete(id: string) {
     if (!confirm("Are you sure you want to remove this location from your book?")) return;
     setDeletingId(id);
+    setDeleteError(null);
     try {
       await onDeleteLocation(id);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Failed to delete location from server.");
     } finally {
       setDeletingId(null);
     }
@@ -101,9 +107,22 @@ export function LocationBookTab({
                 <MapPin size={18} />
               </div>
               <h2 className="text-lg font-bold text-[var(--ink)]">Organization Location Book</h2>
+              <span
+                className={`ml-2 rounded-full px-2.5 py-0.5 text-[10px] font-bold ${
+                  supabaseConnected && userEmail
+                    ? "bg-emerald-100 text-emerald-800"
+                    : "bg-amber-100 text-amber-900"
+                }`}
+              >
+                {supabaseConnected && userEmail
+                  ? "PostgreSQL RLS Active"
+                  : "Local Browser Storage (Unpersisted)"}
+              </span>
             </div>
             <p className="mt-1 text-xs text-[var(--muted)]">
-              Manage your verified enterprise warehouses, logistics hubs, retail branches, and pickup points across Nigeria.
+              {supabaseConnected && userEmail
+                ? "Enterprise facility locations isolated to your authenticated organization."
+                : "Locations are stored in local browser state. Sign in with Supabase to persist to cloud database."}
             </p>
           </div>
 
@@ -126,6 +145,18 @@ export function LocationBookTab({
             </button>
           </div>
         </div>
+
+        {deleteError && (
+          <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-800 flex items-center justify-between">
+            <span>{deleteError}</span>
+            <button
+              onClick={() => setDeleteError(null)}
+              className="text-xs font-bold text-red-900 hover:underline ml-4"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
 
         {/* Search & Category Filter */}
         <div className="mt-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between border-t border-[var(--line)] pt-5">

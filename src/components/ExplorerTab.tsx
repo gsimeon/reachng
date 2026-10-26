@@ -13,17 +13,21 @@ import {
   Check,
   Code2,
   Info,
+  AlertCircle,
 } from "lucide-react";
+import type { LookupStatus } from "@/lib/postcode";
 import { CURATED_EXAMPLES, type CuratedExample, type PostcodeAnatomy } from "@/lib/nigeria-data";
 import { NigeriaMapCard } from "./NigeriaMapCard";
 
 export interface LookupData {
   postcode: string;
-  status: "verified-by-provider" | "demo";
+  status: LookupStatus;
   message: string;
+  isAuthoritative?: boolean;
+  isSimulated?: boolean;
   anatomy?: PostcodeAnatomy;
   providerData?: unknown;
-  isSimulated?: boolean;
+  disclaimer?: string;
 }
 
 interface ExplorerTabProps {
@@ -253,15 +257,37 @@ export function ExplorerTab({
                     className={`rounded-full px-3 py-1 text-xs font-bold ${
                       lookup.status === "verified-by-provider"
                         ? "bg-emerald-100 text-emerald-800"
+                        : lookup.status === "unconfirmed-provider-response"
+                        ? "bg-amber-100 text-amber-900"
                         : "bg-[#fff0e4] text-[#a85b24]"
                     }`}
                   >
                     {lookup.status === "verified-by-provider"
-                      ? "Official Provider Verified"
-                      : "Demo · Simulated Resolution"}
+                      ? "Official Provider Confirmed (NDAPS Active)"
+                      : lookup.status === "unconfirmed-provider-response"
+                      ? "Provider Schema Unconfirmed"
+                      : "Illustrative Simulation · Unconnected Upstream"}
                   </span>
                 </div>
               </div>
+
+              {/* Simulation Notice Banner if not verified by authoritative provider */}
+              {lookup.status !== "verified-by-provider" && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-4 text-xs text-amber-900">
+                  <div className="flex items-start gap-2.5">
+                    <AlertCircle size={16} className="mt-0.5 shrink-0 text-amber-600" />
+                    <div className="space-y-1">
+                      <div className="font-bold text-amber-950">
+                        Prototyping Notice — Synthetic Spatial Topology
+                      </div>
+                      <p className="text-[11px] leading-relaxed text-amber-800">
+                        This lookup was derived algorithmically from 11-character postal structural rules.
+                        Ground coordinates, LGA boundaries, and facility classifications are illustrative simulations and have not been certified by an authoritative NDAPS server.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Anatomy Visual Breakdown */}
               {lookup.anatomy && (
@@ -270,7 +296,7 @@ export function ExplorerTab({
                     <span className="text-xs font-bold text-[var(--ink)]">
                       NDAPS Digital Postcode Anatomical Breakdown
                     </span>
-                    <span className="text-[11px] text-[var(--muted)]">11 Character Spatial Topology</span>
+                    <span className="text-[11px] text-[var(--muted)]">11-Character NDAPS Structural Model (Illustrative Breakdown)</span>
                   </div>
 
                   <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">

@@ -37,13 +37,18 @@ export async function POST(request: Request) {
       raw,
       cleanPostcode: trimmed,
       valid: true,
+      formatVerified: true,
+      isSimulated: true,
       stateCode: anatomy.stateCode,
       stateName: anatomy.stateName,
       lgaName: anatomy.lgaName,
       districtName: anatomy.districtName,
       coordinates: anatomy.coordinates,
+      isEstimatedCoords: true,
+      coordinateAccuracy: anatomy.coordinateAccuracy,
       zoneCategory: anatomy.zoneCategory,
       roadAccessibility: anatomy.roadAccessibility,
+      verificationNote: "11-character format valid. Derived topology is an illustrative simulation, not confirmed by an authoritative NDAPS provider.",
     };
   });
 
@@ -53,6 +58,7 @@ export async function POST(request: Request) {
     total: results.length,
     validCount,
     invalidCount: results.length - validCount,
+    disclaimer: "Batch validation confirms 11-character alphanumeric structural syntax. Ground topology and coordinates are illustrative models and require authoritative NDAPS credentials for live verification.",
     processedAt: new Date().toISOString(),
     results,
   });

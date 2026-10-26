@@ -57,10 +57,12 @@ export function DispatchLabelModal({
           <div className="flex items-center justify-between border-b-2 border-black pb-3">
             <div>
               <div className="text-lg font-black tracking-tighter uppercase">ReachNG Express</div>
-              <div className="text-[10px] font-bold tracking-widest text-gray-600">NIGERIA DIGITAL ROUTING</div>
+              <div className="text-[10px] font-bold tracking-widest text-gray-600">
+                NIGERIA DIGITAL ROUTING (PROTOTYPE SLIP)
+              </div>
             </div>
             <div className="rounded bg-black px-2 py-1 text-[11px] font-black text-white">
-              PRIORITY NDAPS
+              NDAPS ROUTING MODEL
             </div>
           </div>
 
@@ -116,10 +118,15 @@ export function DispatchLabelModal({
             </div>
           </div>
 
-          {/* Footer Coordinates */}
-          <div className="mt-3 flex justify-between border-t border-gray-200 pt-2 text-[9px] text-gray-500">
-            <span>GPS: {anatomy.coordinates.lat}°N, {anatomy.coordinates.lng}°E</span>
-            <span>Ref: {location.id.slice(0, 14)}</span>
+          {/* Footer Coordinates & Disclaimer */}
+          <div className="mt-3 flex flex-col gap-0.5 border-t border-gray-200 pt-2 text-[9px] text-gray-500">
+            <div className="flex justify-between">
+              <span>Anchor (Simulated): ~{anatomy.coordinates.lat}°N, ~{anatomy.coordinates.lng}°E</span>
+              <span>Ref: {location.id.slice(0, 14)}</span>
+            </div>
+            <div className="text-[8px] font-bold text-gray-400 uppercase tracking-tight">
+              PROTOTYPE ROUTING SLIP · NOT AN OFFICIAL NIPOST POSTAL STAMP OR CERTIFIED BILL OF LADING
+            </div>
           </div>
         </div>
 

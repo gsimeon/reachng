@@ -322,7 +322,13 @@ export interface PostcodeAnatomy {
   unitCode: string;
   lgaName: string;
   districtName: string;
+  /**
+   * Note: Coordinates in this structure are synthetic regional benchmarks algorithmically
+   * derived around state centroids for demonstration. They are NOT ground-surveyed GPS coordinates.
+   */
   coordinates: { lat: number; lng: number };
+  isEstimatedCoords: true;
+  coordinateAccuracy: "Approximate Regional Benchmark (Illustrative Simulation)";
   zoneCategory: "Prime Commercial" | "Urban Residential" | "Industrial Logistics" | "Mixed Enterprise";
   dispatchHub: string;
   roadAccessibility: "Paved Dual Carriageway" | "Paved Urban Road" | "Collector Arterial" | "Standard Urban Grid";
@@ -455,6 +461,8 @@ export function parseNdapsPostcode(postcode: string): PostcodeAnatomy {
       lat: Number((matchedState.approxCoords.lat + latOffset).toFixed(4)),
       lng: Number((matchedState.approxCoords.lng + lngOffset).toFixed(4)),
     },
+    isEstimatedCoords: true,
+    coordinateAccuracy: "Approximate Regional Benchmark (Illustrative Simulation)",
     zoneCategory: zoneCategories[distNum % zoneCategories.length],
     dispatchHub: `${matchedState.name} Central Dispatch (${lgaName})`,
     roadAccessibility: roadTypes[distNum % roadTypes.length],
@@ -481,11 +489,13 @@ export interface CorridorCalculation {
   dispatchTier: "Same-Day Intra-City" | "Regional Highway Express" | "Interstate Haulage";
   estimatedTransitHours: string;
   recommendedCorridor: string;
-  routeConfidence: "Direct Arterial" | "Standard Transit" | "Remote Feeder";
+  routeConfidence: "Direct Arterial (Simulated Model)" | "Standard Transit (Simulated Model)" | "Remote Feeder (Simulated Model)";
+  transitDisclaimer: string;
 }
 
 /**
  * Calculates distance, dispatch tier, and transit corridor between two Nigerian digital postcodes.
+ * All transit hours and corridors are simulated estimates for planning, not live SLA commitments.
  */
 export function calculateCorridor(originCode: string, destCode: string): CorridorCalculation {
   const origin = parseNdapsPostcode(originCode);
@@ -506,24 +516,24 @@ export function calculateCorridor(originCode: string, destCode: string): Corrido
 
   let dispatchTier: CorridorCalculation["dispatchTier"] = "Same-Day Intra-City";
   let estimatedTransitHours = "2–4 hours (Express Motorcycle / Van)";
-  let routeConfidence: CorridorCalculation["routeConfidence"] = "Direct Arterial";
+  let routeConfidence: CorridorCalculation["routeConfidence"] = "Direct Arterial (Simulated Model)";
 
   if (origin.stateCode === dest.stateCode) {
     if (distanceKm < 35) {
       dispatchTier = "Same-Day Intra-City";
-      estimatedTransitHours = "2–4 hours";
+      estimatedTransitHours = "2–4 hours (Intra-State Planning Estimate)";
     } else {
       dispatchTier = "Same-Day Intra-City";
-      estimatedTransitHours = "4–8 hours";
+      estimatedTransitHours = "4–8 hours (Intra-State Planning Estimate)";
     }
   } else if (distanceKm < 300) {
     dispatchTier = "Regional Highway Express";
-    estimatedTransitHours = "12–24 hours (Interstate Corridor)";
-    routeConfidence = "Standard Transit";
+    estimatedTransitHours = "12–24 hours (Interstate Corridor Planning Estimate)";
+    routeConfidence = "Standard Transit (Simulated Model)";
   } else {
     dispatchTier = "Interstate Haulage";
-    estimatedTransitHours = "24–48 hours (Cross-Regional Transit)";
-    routeConfidence = "Standard Transit";
+    estimatedTransitHours = "24–48 hours (Cross-Regional Transit Planning Estimate)";
+    routeConfidence = "Standard Transit (Simulated Model)";
   }
 
   const recommendedCorridor =
@@ -539,6 +549,8 @@ export function calculateCorridor(originCode: string, destCode: string): Corrido
     estimatedTransitHours,
     recommendedCorridor,
     routeConfidence,
+    transitDisclaimer:
+      "Transit durations and corridors are algorithmic simulation models derived from regional coordinates and standard highway routing profiles. They are not live carrier telematics or guaranteed SLAs.",
   };
 }
 

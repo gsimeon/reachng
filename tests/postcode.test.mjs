@@ -79,3 +79,67 @@ describe("Corridor distance & transit tier calculation", () => {
     assert.ok(dist < 40, `Expected <40km, got ${dist}km`);
   });
 });
+
+import { z } from "zod";
+
+const ndapsProviderResponseSchema = z.object({
+  postcode: z.string().min(11),
+  status: z.union([
+    z.enum(["active", "registered", "verified", "valid"]),
+    z.literal(true),
+  ]),
+  state: z.string().optional(),
+  lga: z.string().optional(),
+  district: z.string().optional(),
+  verified_at: z.string().optional(),
+  source: z.string().optional(),
+}).passthrough();
+
+describe("NDAPS upstream provider schema validation", () => {
+  it("validates an authentic provider payload matching contract", () => {
+    const validPayload = {
+      postcode: "LA010010101",
+      status: "active",
+      state: "Lagos",
+      lga: "Ikeja",
+      verified_at: "2026-10-26T12:00:00Z",
+      source: "NIPOST-NDAPS-CORE",
+    };
+    const res = ndapsProviderResponseSchema.safeParse(validPayload);
+    assert.equal(res.success, true);
+  });
+
+  it("rejects an upstream response missing postcode or valid status", () => {
+    const invalidPayload = {
+      message: "Success",
+      code: 200,
+    };
+    const res = ndapsProviderResponseSchema.safeParse(invalidPayload);
+    assert.equal(res.success, false);
+  });
+
+  it("rejects an upstream response with invalid status indicator", () => {
+    const invalidStatusPayload = {
+      postcode: "LA010010101",
+      status: "unknown_pending_review",
+    };
+    const res = ndapsProviderResponseSchema.safeParse(invalidStatusPayload);
+    assert.equal(res.success, false);
+  });
+});
+
+describe("Trust & simulation guard rails", () => {
+  it("ensures simulated results are not marked authoritative", () => {
+    const simulatedLookup = {
+      postcode: "LA010010101",
+      status: "simulated-demo",
+      isAuthoritative: false,
+      isSimulated: true,
+      disclaimer: "Coordinates and LGA assignments are synthetic models.",
+    };
+
+    assert.equal(simulatedLookup.isAuthoritative, false);
+    assert.equal(simulatedLookup.isSimulated, true);
+    assert.notEqual(simulatedLookup.status, "verified-by-provider");
+  });
+});

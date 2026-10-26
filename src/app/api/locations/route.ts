@@ -6,6 +6,7 @@ const locationSchema = z.object({
   label: z.string().trim().min(1).max(80),
   postcode: z.string().trim().regex(/^[A-Za-z0-9]{11}$/),
   address: z.string().trim().max(300).optional().default(""),
+  category: z.enum(["Fulfilment Hub", "Retail Store", "Pickup Station", "Dispatch Office"]).optional().default("Fulfilment Hub"),
 });
 
 export async function GET() {
@@ -16,7 +17,7 @@ export async function GET() {
 
   const { data, error } = await supabase
     .from("locations")
-    .select("id, label, postcode, address, created_at")
+    .select("id, label, postcode, address, category, created_at")
     .order("created_at", { ascending: false })
     .limit(100);
 
@@ -35,7 +36,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Request body must be valid JSON." }, { status: 400 });
   }
   const parsed = locationSchema.safeParse(body);
-  if (!parsed.success) return NextResponse.json({ error: "Check the location label and 11-character postcode." }, { status: 422 });
+  if (!parsed.success) return NextResponse.json({ error: "Check the location label, category, and 11-character postcode." }, { status: 422 });
 
   // The database trigger derives the user's organization membership; never trust a
   // client-supplied organization_id.
@@ -43,10 +44,11 @@ export async function POST(request: Request) {
     label: parsed.data.label,
     postcode: parsed.data.postcode.toUpperCase(),
     address: parsed.data.address,
+    category: parsed.data.category,
     created_by: user.id,
-  }).select("id, label, postcode, address, created_at").single();
+  }).select("id, label, postcode, address, category, created_at").single();
 
-  if (error) return NextResponse.json({ error: "Could not save location. Check that your profile belongs to an organization." }, { status: 400 });
+  if (error) return NextResponse.json({ error: `Could not save location: ${error.message}` }, { status: 400 });
   return NextResponse.json({ location: data }, { status: 201 });
 }
 

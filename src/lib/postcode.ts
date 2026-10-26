@@ -1,23 +1,47 @@
+import { z } from "zod";
 import { parseNdapsPostcode, type PostcodeAnatomy } from "./nigeria-data";
 
-export type LookupResult = {
+export type LookupStatus = "verified-by-provider" | "unconfirmed-provider-response" | "simulated-demo" | "demo";
+
+export interface LookupResult {
   postcode: string;
-  status: "verified-by-provider" | "demo";
+  status: LookupStatus;
   message: string;
+  isAuthoritative: boolean;
+  isSimulated: boolean;
   providerData?: unknown;
   anatomy?: PostcodeAnatomy;
-  isSimulated?: boolean;
-};
+  disclaimer?: string;
+}
 
 const postcodePattern = /^[A-Za-z0-9]{11}$/;
 
 /**
- * Format validation is only a client-side sanity check. It does not prove that a
- * postcode exists, belongs to a person, or is deliverable.
+ * Format validation is only a client-side sanity check. It proves 11-character alphanumeric
+ * structural compliance, but does NOT prove that a postcode exists, belongs to a person,
+ * or has been registered in the official NDAPS database.
  */
 export function looksLikeNdapsPostcode(value: string): boolean {
   return postcodePattern.test(value.trim());
 }
+
+/**
+ * Documented response schema contract for authoritative NDAPS provider lookups.
+ * Only responses that strictly validate against this contract and indicate an active/verified
+ * status will be marked as "verified-by-provider".
+ */
+export const ndapsProviderResponseSchema = z.object({
+  postcode: z.string().min(11),
+  status: z.union([
+    z.enum(["active", "registered", "verified", "valid"]),
+    z.literal(true),
+  ]),
+  state: z.string().optional(),
+  lga: z.string().optional(),
+  district: z.string().optional(),
+  verified_at: z.string().optional(),
+  source: z.string().optional(),
+}).passthrough();
 
 export async function lookupPostcode(rawPostcode: string): Promise<LookupResult> {
   const postcode = rawPostcode.trim().toUpperCase();
@@ -30,15 +54,17 @@ export async function lookupPostcode(rawPostcode: string): Promise<LookupResult>
   if (!baseUrl || !apiKey || !lookupPath) {
     return {
       postcode,
-      status: "demo",
-      message: "Format accepted. Provider verification is not configured yet; this is a simulated preview based on NDAPS postal layout.",
-      anatomy,
+      status: "simulated-demo",
+      isAuthoritative: false,
       isSimulated: true,
+      message: "Illustrative simulation. Upstream NDAPS provider is not configured. This preview is derived from 11-character postal structural rules, not an authoritative registry.",
+      disclaimer: "Coordinates, LGA assignments, and district names are synthetic models generated for demonstration and are not authoritative ground-surveyed records.",
+      anatomy,
     };
   }
 
-  // API contract is deliberately configuration-driven. Confirm the official
-  // provider's path, request method, query parameter, and response schema before use.
+  // API contract is configuration-driven. Confirm the official provider's path,
+  // request method, query parameter, and response schema before production usage.
   const url = new URL(lookupPath, baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
   url.searchParams.set("postcode", postcode);
 
@@ -59,14 +85,30 @@ export async function lookupPostcode(rawPostcode: string): Promise<LookupResult>
     if (!response.ok) {
       throw new Error(`Provider returned HTTP ${response.status}`);
     }
-    const providerData: unknown = await response.json();
+    const rawJson: unknown = await response.json();
+    const validation = ndapsProviderResponseSchema.safeParse(rawJson);
+
+    if (validation.success) {
+      return {
+        postcode,
+        status: "verified-by-provider",
+        isAuthoritative: true,
+        isSimulated: false,
+        message: "Authoritative NDAPS provider response validated. Postal registration confirmed.",
+        providerData: validation.data,
+        anatomy,
+      };
+    }
+
     return {
       postcode,
-      status: "verified-by-provider",
-      message: "The provider returned a successful response. Review the raw response before treating any fields as authoritative.",
-      providerData,
-      anatomy,
+      status: "unconfirmed-provider-response",
+      isAuthoritative: false,
       isSimulated: false,
+      message: "Upstream provider returned an HTTP 200 response, but the response schema failed the official NDAPS verification contract. Review raw payload.",
+      disclaimer: "Provider response does not conform to the documented verification schema; cannot be treated as authoritative.",
+      providerData: rawJson,
+      anatomy,
     };
   } finally {
     clearTimeout(timeout);

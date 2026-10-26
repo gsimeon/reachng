@@ -5,7 +5,6 @@ import {
   Route,
   Gauge,
   Sparkles,
-  ShieldCheck,
 } from "lucide-react";
 import {
   calculateCorridor,
@@ -212,7 +211,7 @@ export function CorridorTab({ locations }: CorridorTabProps) {
                   <div className="mt-1 font-mono text-xl font-bold text-[var(--ink)]">
                     {calculation.estimatedTransitHours.split("(")[0]}
                   </div>
-                  <div className="mt-1 text-[11px] text-[var(--muted)]">Estimated SLA</div>
+                  <div className="mt-1 text-[11px] text-[var(--muted)]">Simulated Planning Model</div>
                 </div>
               </div>
 
@@ -220,16 +219,20 @@ export function CorridorTab({ locations }: CorridorTabProps) {
               <div className="mt-5 space-y-2 text-xs border-t border-[var(--line)] pt-4">
                 <div className="flex items-center justify-between">
                   <span className="text-[var(--muted)]">Origin Hub:</span>
-                  <span className="font-semibold text-[var(--ink)]">
-                    {calculation.originAnatomy.lgaName}, {calculation.originAnatomy.stateName} (
-                    {calculation.originAnatomy.coordinates.lat}°N, {calculation.originAnatomy.coordinates.lng}°E)
+                  <span className="font-semibold text-[var(--ink)] text-right">
+                    {calculation.originAnatomy.lgaName}, {calculation.originAnatomy.stateName}
+                    <span className="block text-[10px] text-[var(--muted)]">
+                      ~{calculation.originAnatomy.coordinates.lat}°N, ~{calculation.originAnatomy.coordinates.lng}°E (Simulated Anchor)
+                    </span>
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-[var(--muted)]">Destination:</span>
-                  <span className="font-semibold text-[var(--ink)]">
-                    {calculation.destAnatomy.lgaName}, {calculation.destAnatomy.stateName} (
-                    {calculation.destAnatomy.coordinates.lat}°N, {calculation.destAnatomy.coordinates.lng}°E)
+                  <span className="font-semibold text-[var(--ink)] text-right">
+                    {calculation.destAnatomy.lgaName}, {calculation.destAnatomy.stateName}
+                    <span className="block text-[10px] text-[var(--muted)]">
+                      ~{calculation.destAnatomy.coordinates.lat}°N, ~{calculation.destAnatomy.coordinates.lng}°E (Simulated Anchor)
+                    </span>
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
@@ -241,11 +244,12 @@ export function CorridorTab({ locations }: CorridorTabProps) {
               </div>
             </div>
 
-            <div className="mt-5 rounded-xl border border-emerald-200 bg-emerald-50/60 p-3 text-[11px] text-emerald-900 flex items-center gap-2">
-              <ShieldCheck size={16} className="text-emerald-700 shrink-0" />
-              <span>
-                Accurate NDAPS zoning eliminates failed delivery attempts caused by ambiguous street addresses.
-              </span>
+            {/* Simulation Disclaimer Alert */}
+            <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50/70 p-3.5 text-[11px] text-amber-900">
+              <div className="font-bold text-amber-950 mb-0.5">Planning Estimate Notice</div>
+              <p className="text-amber-800 leading-relaxed">
+                {calculation.transitDisclaimer} Operational dispatch requires carrier integration, live telematics, and road condition verification.
+              </p>
             </div>
           </div>
         )}

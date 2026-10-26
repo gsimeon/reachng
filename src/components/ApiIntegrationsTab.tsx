@@ -338,16 +338,21 @@ print(response.json())`;
 
       {/* Webhook Simulator Section */}
       <div className="overflow-hidden rounded-3xl border border-[var(--line)] bg-white p-6 sm:p-8 shadow-sm">
-        <div className="flex items-center gap-2">
-          <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-[#fff0e4] text-[var(--orange)]">
-            <Radio size={18} />
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="flex items-center gap-2">
+            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-[#fff0e4] text-[var(--orange)]">
+              <Radio size={18} />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-[var(--ink)]">Client-Side Webhook Payload Simulator</h3>
+              <p className="text-xs text-[var(--muted)]">
+                Local preview of webhook callback payloads and HMAC-SHA256 signature formatting. (Prototyping simulator — does not dispatch network HTTP requests).
+              </p>
+            </div>
           </div>
-          <div>
-            <h3 className="text-sm font-bold text-[var(--ink)]">Webhook Event Dispatch Simulator</h3>
-            <p className="text-xs text-[var(--muted)]">
-              Simulate webhook callbacks for e-commerce checkouts and logistics delivery confirmation.
-            </p>
-          </div>
+          <span className="rounded-full bg-amber-100 px-3 py-1 text-[11px] font-bold text-amber-900">
+            Local Prototyping Only
+          </span>
         </div>
 
         <div className="mt-6 grid gap-4 sm:grid-cols-2">
@@ -365,7 +370,7 @@ print(response.json())`;
           </div>
 
           <div>
-            <label className="mb-1 block text-xs font-bold text-[var(--ink)]">Target Webhook URL</label>
+            <label className="mb-1 block text-xs font-bold text-[var(--ink)]">Target Webhook URL (Documentation Example)</label>
             <input
               value={webhookUrl}
               onChange={(e) => setWebhookUrl(e.target.value)}
@@ -380,15 +385,50 @@ print(response.json())`;
             className="flex items-center gap-2 rounded-xl bg-[var(--orange)] px-5 py-2.5 text-xs font-bold text-white shadow-sm transition hover:bg-[#d95d18]"
           >
             <Radio size={14} />
-            <span>Dispatch Test Webhook</span>
+            <span>Generate Mock Webhook Payload</span>
           </button>
 
           {webhookTriggered && (
-            <span className="flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-800 border border-emerald-200">
-              <Check size={14} /> Test event dispatched (HMAC signature generated)
+            <span className="flex items-center gap-1.5 rounded-lg bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-900 border border-amber-200">
+              <Check size={14} /> Simulated payload & HMAC signature generated locally
             </span>
           )}
         </div>
+
+        {webhookTriggered && (
+          <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50/50 p-4 font-mono text-xs text-[var(--ink)]">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-amber-900 mb-2 font-sans">
+              Simulated Outbound HTTP Headers & Payload (Demo View):
+            </div>
+            <div className="text-gray-600 mb-2">
+              POST {webhookUrl}
+              <br />
+              X-ReachNG-Event: {webhookEvent}
+              <br />
+              X-ReachNG-Signature: sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 (Simulated HMAC)
+              <br />
+              X-ReachNG-Timestamp: {new Date().toISOString()}
+            </div>
+            <pre className="overflow-x-auto rounded-xl bg-black p-3 text-[11px] text-emerald-400">
+{JSON.stringify(
+  {
+    event: webhookEvent,
+    timestamp: new Date().toISOString(),
+    isSimulation: true,
+    data: {
+      postcode: "LA010010101",
+      state: "Lagos",
+      lga: "Ikeja",
+      verified: true,
+      provider: "ndaps-live-gateway",
+    },
+  },
+  null,
+  2
+)}
+            </pre>
+          </div>
+        )}
       </div>
     </div>
   );
