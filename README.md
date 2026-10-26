@@ -1,8 +1,13 @@
 # ReachNG
 
+[![CI](https://github.com/gsimeon/reachng/actions/workflows/ci.yml/badge.svg)](https://github.com/gsimeon/reachng/actions/workflows/ci.yml)
+
 **Every destination. Within reach.**
 
-ReachNG is an enterprise location intelligence and digital postcode platform built for Nigerian commerce, logistics, field operations, and developer integrations. It operationalises the **Nigeria Digital Postcode Address Verification System (NDAPS)** 11-character spatial standard across all 36 States and the Federal Capital Territory (Abuja).
+ReachNG is an enterprise location intelligence and digital postcode platform built for Nigerian commerce, logistics, field operations, and developer integrations. It operationalises the **Nigeria Digital Postcode Address Verification System (NDAPS)** 11-character alphanumeric spatial standard across all 36 States and the Federal Capital Territory (Abuja).
+
+> [!NOTE]
+> **Data Accuracy & Verification Notice**: Format checks confirm 11-character alphanumeric structural compliance. Simulated coordinates and district naming represent regional reference centroids for prototyping and testing. Official door-to-door verification requires active, authenticated upstream NDAPS credentials.
 
 ---
 
@@ -15,12 +20,12 @@ ReachNG is an enterprise location intelligence and digital postcode platform bui
   * Characters 3–5: Local Government Area (LGA) Zone Code
   * Characters 6–9: Sector & District Area Code
   * Characters 10–11: Delivery Unit / Parcel Block Code
-* **Geo-Positioning Card**: Precise coordinates (lat/lng), area classification (*Prime Commercial, Urban Residential, Industrial Logistics*), road access tiers, and direct Google Maps navigation.
+* **Geo-Positioning Card**: Regional reference coordinates (lat/lng), area classification (*Prime Commercial, Urban Residential, Industrial Logistics*), road access tiers, and regional Google Maps view.
 
 ### 2. National Postcode Directory & Reverse Lookup
-* Comprehensive administrative dataset covering **all 36 Nigerian States + FCT**.
+* Reference administrative dataset covering **all 36 Nigerian States + FCT**.
 * Filter by geopolitical zone (*South West, South South, South East, North Central, North West, North East*).
-* Select State and LGA to instantly generate official NDAPS digital postcodes and preview location topology.
+* Select State and LGA to generate sample 11-character NDAPS digital postcodes and test format construction.
 
 ### 3. Batch Postcode Cleanser & Normalizer
 * Process lists of up to 100 digital postcodes at once via `POST /api/batch`.
@@ -33,18 +38,19 @@ ReachNG is an enterprise location intelligence and digital postcode platform bui
   * **Same-Day Intra-City** (< 35 km)
   * **Regional Highway Express** (Inter-state corridor)
   * **Interstate Haulage** (Cross-country transit)
-* Provides estimated transit SLAs, route classification, and last-mile accessibility.
+* Provides estimated transit windows, route classification, and simulated road accessibility models.
 
 ### 5. Enterprise Location Book & Dispatch Labels
 * Organize business facilities (*Fulfilment Hubs, Retail Stores, Pickup Stations, Dispatch Offices*).
 * Live keyword search, category filtering, and one-click CSV export.
-* **Courier Dispatch Label Generator**: Printable thermal routing slips with 11-digit NDAPS codes, consignee/origin hub details, and barcode/QR verification blocks.
-* **Dual-Mode Persistence**: Connects to Supabase with Row-Level Security and tenant isolation when configured, and falls back to local storage with pre-seeded Nigerian distribution hubs when in demo mode.
+* **Courier Dispatch Label Generator**: Thermal routing slips with 11-character NDAPS codes, consignee/origin hub details, and barcode/QR verification blocks.
+* **Truthful Dual-Mode Persistence**: Connects to Supabase with PostgreSQL Row-Level Security (RLS) and strict tenant isolation when configured, and falls back to explicit local browser storage in sandbox demo mode.
+* **Database Migration**: Canonical multi-tenant schema with triggers and RLS policies at `supabase/migrations/202610260001_initial_schema.sql`.
 
 ### 6. Developer API & Integrations Sandbox
 * Interactive API runner for `POST /api/postcode`, `POST /api/batch`, and `GET /api/locations`.
 * Instant copy-paste code snippets in 4 languages: **cURL**, **JavaScript (Fetch)**, **Node.js (Axios)**, and **Python (Requests)**.
-* Webhook event simulator (`postcode.verified`, `location.created`, `address.flagged`) with HMAC signature headers.
+* Client-side webhook event simulator (`postcode.verified`, `location.created`, `address.flagged`) with HMAC signature header preview.
 * Server-side provider key isolation: NDAPS government API credentials never leak to client browsers.
 
 ---
@@ -52,7 +58,7 @@ ReachNG is an enterprise location intelligence and digital postcode platform bui
 ## Getting Started
 
 ### Prerequisites
-* Node.js 20.9+ (LTS)
+* Node.js 20+ (LTS)
 * npm
 
 ### Quick Start
@@ -67,15 +73,15 @@ cp .env.example .env.local
 npm run dev
 
 # 4. Open in browser
-# http://localhost:3000 (or http://localhost:3002 if 3000 is occupied)
+# http://localhost:3000
 ```
 
-### Automated Verification
+### Automated Verification & CI
 ```bash
-# Unit tests
-node --test tests/postcode.test.mjs
+# Run complete test suite (unit + route integration + tenant isolation)
+npm test
 
-# TypeScript check
+# TypeScript typecheck
 npm run typecheck
 
 # Code linter
