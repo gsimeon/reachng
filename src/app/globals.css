@@ -1,0 +1,95 @@
+@import "tailwindcss";
+
+:root {
+  --green: #176b48;
+  --green-deep: #0e3b29;
+  --green-hover: #125539;
+  --green-soft: #ebf6ef;
+  --green-soft-border: #cfe5d6;
+  --orange: #f27427;
+  --orange-light: #fff5ed;
+  --orange-deep: #c9510c;
+  --ink: #182d26;
+  --muted: #5e736a;
+  --subtle: #8da198;
+  --line: #e3ebe5;
+  --line-strong: #cad8ce;
+  --paper: #ffffff;
+  --canvas: #f6f8f5;
+  --card-bg: #ffffff;
+  --code-bg: #111e19;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100%;
+  background: var(--canvas);
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button, input, select, textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+::selection {
+  background: #cde8d6;
+  color: var(--green-deep);
+}
+
+/* Custom scrollbars for clean dashboards */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #d4ded7;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #b5c4ba;
+}
+
+/* Subtle badge pulse */
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.85; transform: scale(1.04); }
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* Glass effect */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+/* Badge glows */
+.glow-green {
+  box-shadow: 0 0 16px rgba(23, 107, 72, 0.16);
+}
+
+.glow-orange {
+  box-shadow: 0 0 16px rgba(242, 116, 39, 0.2);
+}
