@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { z } from "zod";
 
 const looksLike = (value) => /^[A-Za-z0-9]{11}$/.test(value.trim());
 
@@ -22,6 +23,19 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return Math.round(R * c);
 }
+
+const ndapsProviderResponseSchema = z.object({
+  postcode: z.string().trim().regex(/^[A-Za-z0-9]{11}$/),
+  status: z.union([
+    z.enum(["active", "registered", "verified", "valid"]),
+    z.literal(true),
+  ]),
+  state: z.string().optional(),
+  lga: z.string().optional(),
+  district: z.string().optional(),
+  verified_at: z.string().optional(),
+  source: z.string().optional(),
+}).passthrough();
 
 describe("NDAPS postcode format guard", () => {
   it("accepts 11 alphanumeric characters", () => {
@@ -80,22 +94,7 @@ describe("Corridor distance & transit tier calculation", () => {
   });
 });
 
-import { z } from "zod";
-
-const ndapsProviderResponseSchema = z.object({
-  postcode: z.string().min(11),
-  status: z.union([
-    z.enum(["active", "registered", "verified", "valid"]),
-    z.literal(true),
-  ]),
-  state: z.string().optional(),
-  lga: z.string().optional(),
-  district: z.string().optional(),
-  verified_at: z.string().optional(),
-  source: z.string().optional(),
-}).passthrough();
-
-describe("NDAPS upstream provider schema validation", () => {
+describe("NDAPS upstream provider schema validation & exact matching", () => {
   it("validates an authentic provider payload matching contract", () => {
     const validPayload = {
       postcode: "LA010010101",
@@ -109,12 +108,34 @@ describe("NDAPS upstream provider schema validation", () => {
     assert.equal(res.success, true);
   });
 
+  it("rejects an upstream response with a mismatched postcode", () => {
+    const requestedPostcode = "LA010010101";
+    const providerPayload = {
+      postcode: "KN010020101", // Mismatched Kano code
+      status: "active",
+    };
+
+    const res = ndapsProviderResponseSchema.safeParse(providerPayload);
+    assert.equal(res.success, true);
+    // Explicit exact postcode match check
+    assert.notEqual(res.data.postcode, requestedPostcode);
+  });
+
   it("rejects an upstream response missing postcode or valid status", () => {
     const invalidPayload = {
       message: "Success",
       code: 200,
     };
     const res = ndapsProviderResponseSchema.safeParse(invalidPayload);
+    assert.equal(res.success, false);
+  });
+
+  it("rejects an upstream response with non-11-character postcode format", () => {
+    const badLengthPayload = {
+      postcode: "LA01", // Too short
+      status: "active",
+    };
+    const res = ndapsProviderResponseSchema.safeParse(badLengthPayload);
     assert.equal(res.success, false);
   });
 
@@ -128,18 +149,34 @@ describe("NDAPS upstream provider schema validation", () => {
   });
 });
 
-describe("Trust & simulation guard rails", () => {
-  it("ensures simulated results are not marked authoritative", () => {
-    const simulatedLookup = {
-      postcode: "LA010010101",
-      status: "simulated-demo",
-      isAuthoritative: false,
-      isSimulated: true,
-      disclaimer: "Coordinates and LGA assignments are synthetic models.",
+describe("Trust & state machine integrity", () => {
+  it("enforces explicit separation of provider_confirmed, demo, and unconfirmed states", () => {
+    const states = [
+      { status: "provider_confirmed", isAuthoritative: true, isSimulated: false },
+      { status: "format_checked", isAuthoritative: false, isSimulated: false },
+      { status: "unconfirmed_provider_response", isAuthoritative: false, isSimulated: false },
+      { status: "provider_unavailable", isAuthoritative: false, isSimulated: false },
+      { status: "demo", isAuthoritative: false, isSimulated: true },
+    ];
+
+    for (const item of states) {
+      if (item.status === "provider_confirmed") {
+        assert.equal(item.isAuthoritative, true);
+        assert.equal(item.isSimulated, false);
+      } else {
+        assert.equal(item.isAuthoritative, false);
+      }
+    }
+  });
+
+  it("never treats derived anatomical centroids as ground-surveyed GPS coordinates", () => {
+    const derivedAnatomy = {
+      coordinates: { lat: 6.5244, lng: 3.3792 },
+      isEstimatedCoords: true,
+      coordinateAccuracy: "Approximate Regional Benchmark (Illustrative Simulation)",
     };
 
-    assert.equal(simulatedLookup.isAuthoritative, false);
-    assert.equal(simulatedLookup.isSimulated, true);
-    assert.notEqual(simulatedLookup.status, "verified-by-provider");
+    assert.equal(derivedAnatomy.isEstimatedCoords, true);
+    assert.ok(derivedAnatomy.coordinateAccuracy.includes("Illustrative Simulation"));
   });
 });

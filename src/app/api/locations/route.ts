@@ -9,6 +9,7 @@ const locationSchema = z.object({
   postcode: z.string().trim().regex(/^[A-Za-z0-9]{11}$/),
   address: z.string().trim().max(300).optional().default(""),
   category: z.enum(["Fulfilment Hub", "Retail Store", "Pickup Station", "Dispatch Office"]).optional().default("Fulfilment Hub"),
+  organization_id: z.string().uuid().optional(),
 });
 
 export async function GET(request: Request) {
@@ -41,12 +42,20 @@ export async function GET(request: Request) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Sign in to view saved locations." }, { status: 401, headers: rateLimitHeaders });
 
-  const { data, error } = await supabase
+  const { searchParams } = new URL(request.url);
+  const targetOrgId = searchParams.get("organization_id") || request.headers.get("x-organization-id");
+
+  let query = supabase
     .from("locations")
-    .select("id, label, postcode, address, category, created_at")
+    .select("id, organization_id, label, postcode, address, category, created_at")
     .order("created_at", { ascending: false })
     .limit(100);
 
+  if (targetOrgId && z.string().uuid().safeParse(targetOrgId).success) {
+    query = query.eq("organization_id", targetOrgId);
+  }
+
+  const { data, error } = await query;
   const durationMs = performance.now() - start;
 
   if (error) {
@@ -69,7 +78,7 @@ export async function GET(request: Request) {
     clientIp,
     statusCode: 200,
     durationMs,
-    metadata: { userId: user.id, count: data?.length ?? 0 },
+    metadata: { userId: user.id, count: data?.length ?? 0, targetOrgId: targetOrgId || "all-memberships" },
   });
 
   return NextResponse.json({ locations: data }, { status: 200, headers: rateLimitHeaders });
@@ -112,28 +121,42 @@ export async function POST(request: Request) {
   const parsed = locationSchema.safeParse(body);
   if (!parsed.success) return NextResponse.json({ error: "Check the location label, category, and 11-character postcode." }, { status: 422, headers: rateLimitHeaders });
 
-  // Database trigger derives user's organization; client-supplied org id is never trusted.
-  const { data, error } = await supabase.from("locations").insert({
+  const insertPayload: Record<string, unknown> = {
     label: parsed.data.label,
     postcode: parsed.data.postcode.toUpperCase(),
     address: parsed.data.address,
     category: parsed.data.category,
     created_by: user.id,
-  }).select("id, label, postcode, address, category, created_at").single();
+  };
+
+  if (parsed.data.organization_id) {
+    insertPayload.organization_id = parsed.data.organization_id;
+  }
+
+  // Database trigger validates membership for explicit organization_id or assigns primary org.
+  const { data, error } = await supabase
+    .from("locations")
+    .insert(insertPayload)
+    .select("id, organization_id, label, postcode, address, category, created_at")
+    .single();
 
   const durationMs = performance.now() - start;
 
   if (error) {
+    const isAuthError = error.message.toLowerCase().includes("unauthorized") || error.message.toLowerCase().includes("not a member");
+    const status = isAuthError ? 403 : 400;
+
     recordAuditEvent({
       eventType: "location.create",
       level: "error",
       requestId,
       clientIp,
-      statusCode: 400,
+      statusCode: status,
       durationMs,
       metadata: { userId: user.id, category: parsed.data.category, error: error.message },
     });
-    return NextResponse.json({ error: `Could not save location: ${error.message}` }, { status: 400, headers: rateLimitHeaders });
+
+    return NextResponse.json({ error: `Could not save location: ${error.message}` }, { status, headers: rateLimitHeaders });
   }
 
   recordAuditEvent({
@@ -143,7 +166,7 @@ export async function POST(request: Request) {
     clientIp,
     statusCode: 201,
     durationMs,
-    metadata: { userId: user.id, locationId: data?.id, category: parsed.data.category },
+    metadata: { userId: user.id, locationId: data?.id, organizationId: data?.organization_id, category: parsed.data.category },
   });
 
   return NextResponse.json({ location: data }, { status: 201, headers: rateLimitHeaders });

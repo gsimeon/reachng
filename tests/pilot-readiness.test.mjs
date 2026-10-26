@@ -220,14 +220,18 @@ describe("System Health & Diagnostic Telemetry Schema", () => {
     version: z.string(),
     checks: z.object({
       database: z.object({
-        status: z.enum(["ready", "unconfigured"]),
+        configured: z.boolean(),
+        reachable: z.boolean(),
+        latencyMs: z.number().optional(),
+        error: z.string().optional(),
         provider: z.string(),
         rlsEnforced: z.boolean(),
       }),
       ndapsProvider: z.object({
+        configured: z.boolean(),
         status: z.enum(["live", "simulated"]),
         mode: z.enum(["authoritative", "illustrative-fallback"]),
-        upstreamConfigured: z.boolean(),
+        endpointHost: z.string(),
       }),
       rateLimiter: z.object({
         status: z.literal("operational"),
@@ -257,27 +261,30 @@ describe("System Health & Diagnostic Telemetry Schema", () => {
       version: "0.1.0",
       checks: {
         database: {
-          status: "ready",
+          configured: true,
+          reachable: true,
+          latencyMs: 18,
           provider: "supabase-cloud",
           rlsEnforced: true,
         },
         ndapsProvider: {
+          configured: false,
           status: "simulated",
           mode: "illustrative-fallback",
-          upstreamConfigured: false,
+          endpointHost: "unconfigured",
         },
         rateLimiter: {
           status: "operational",
-          type: "in-memory-sliding-window",
+          type: "sliding-window-tiered",
           trackedLimits: {
-            postcodeLookup: "60 req/min",
-            batchCleanse: "10 req/min",
-            locationMutations: "30 req/min",
+            postcodeLookup: "60 req/min (300 authenticated)",
+            batchCleanse: "10 req/min (50 authenticated)",
+            locationMutations: "30 req/min (150 authenticated)",
           },
         },
         auditLogger: {
           status: "operational",
-          sink: "stdout-json",
+          sink: "dual (stdout + postgresql)",
           recentEventCount: 12,
         },
         security: {

@@ -114,10 +114,6 @@ export default function Home() {
       return () => {
         subscription.unsubscribe();
       };
-    } else {
-      // Local fallback session
-      const savedEmail = localStorage.getItem("reachng_user");
-      if (savedEmail) setUserEmail(savedEmail);
     }
   }, []);
 
@@ -128,12 +124,10 @@ export default function Home() {
 
   function handleLogin(email: string) {
     setUserEmail(email);
-    localStorage.setItem("reachng_user", email);
   }
 
   function handleLogout() {
     setUserEmail(null);
-    localStorage.removeItem("reachng_user");
   }
 
   async function handleSaveLocation(loc: {

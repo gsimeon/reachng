@@ -7,6 +7,7 @@ const locationSchema = z.object({
   postcode: z.string().trim().regex(/^[A-Za-z0-9]{11}$/),
   address: z.string().trim().max(300).optional().default(""),
   category: z.enum(["Fulfilment Hub", "Retail Store", "Pickup Station", "Dispatch Office"]).optional().default("Fulfilment Hub"),
+  organization_id: z.string().uuid().optional(),
 });
 
 describe("Location schema validation", () => {
@@ -22,6 +23,19 @@ describe("Location schema validation", () => {
     if (res.success) {
       assert.equal(res.data.label, "Ikeja Main Hub");
       assert.equal(res.data.category, "Fulfilment Hub");
+    }
+  });
+
+  it("accepts an optional valid UUID organization_id for workspace targeting", () => {
+    const input = {
+      label: "Apapa Port Station",
+      postcode: "LA010010203",
+      organization_id: "123e4567-e89b-42d3-a456-426614174000",
+    };
+    const res = locationSchema.safeParse(input);
+    assert.equal(res.success, true);
+    if (res.success) {
+      assert.equal(res.data.organization_id, "123e4567-e89b-42d3-a456-426614174000");
     }
   });
 
@@ -48,14 +62,12 @@ describe("Location schema validation", () => {
 
 describe("Tenant isolation & RLS multi-tenant model", () => {
   // In-memory simulation of Supabase PostgreSQL RLS tables and policies
-  const organizations = [
-    { id: "org-alpha-1111", name: "Alpha Logistics Ltd", created_by: "user-alpha" },
-    { id: "org-beta-2222", name: "Beta Express Corp", created_by: "user-beta" },
-  ];
-
   const organization_members = [
     { organization_id: "org-alpha-1111", user_id: "user-alpha", role: "owner" },
     { organization_id: "org-beta-2222", user_id: "user-beta", role: "owner" },
+    // Multi-tenant user: belongs to both Alpha and Beta
+    { organization_id: "org-alpha-1111", user_id: "user-multi", role: "member" },
+    { organization_id: "org-beta-2222", user_id: "user-multi", role: "admin" },
   ];
 
   const locationsTable = [
@@ -75,13 +87,46 @@ describe("Tenant isolation & RLS multi-tenant model", () => {
     },
   ];
 
-  function queryLocationsForUser(userId) {
+  function queryLocationsForUser(userId, targetOrgId = null) {
     const userOrgIds = organization_members
       .filter((m) => m.user_id === userId)
       .map((m) => m.organization_id);
 
-    // Simulates: select * from locations where organization_id in (select my_organization_ids())
-    return locationsTable.filter((loc) => userOrgIds.includes(loc.organization_id));
+    return locationsTable.filter((loc) => {
+      const allowed = userOrgIds.includes(loc.organization_id);
+      if (!allowed) return false;
+      return targetOrgId ? loc.organization_id === targetOrgId : true;
+    });
+  }
+
+  function insertLocationAsUser(userId, input) {
+    const userOrgMemberships = organization_members
+      .filter((m) => m.user_id === userId)
+      .map((m) => m.organization_id);
+
+    if (userOrgMemberships.length === 0) {
+      throw new Error("No active workspace found for user");
+    }
+
+    let finalOrgId;
+    if (input.organization_id) {
+      if (!userOrgMemberships.includes(input.organization_id)) {
+        throw new Error("Unauthorized: user is not a member of the specified organization");
+      }
+      finalOrgId = input.organization_id;
+    } else {
+      finalOrgId = userOrgMemberships[0]; // Primary fallback
+    }
+
+    const newLoc = {
+      id: `loc-${Date.now()}-${Math.random()}`,
+      organization_id: finalOrgId,
+      label: input.label,
+      postcode: input.postcode,
+      created_by: userId,
+    };
+    locationsTable.push(newLoc);
+    return newLoc;
   }
 
   function deleteLocationAsUser(userId, locationId) {
@@ -92,7 +137,6 @@ describe("Tenant isolation & RLS multi-tenant model", () => {
     const targetLoc = locationsTable.find((loc) => loc.id === locationId);
     if (!targetLoc) return { success: false, error: "Not found" };
 
-    // Simulates RLS delete policy: where organization_id in (select my_organization_ids())
     if (!userOrgIds.includes(targetLoc.organization_id)) {
       return { success: false, error: "Unauthorized: cross-tenant access violation" };
     }
@@ -119,9 +163,35 @@ describe("Tenant isolation & RLS multi-tenant model", () => {
     assert.equal(result.success, false);
     assert.match(result.error, /cross-tenant access violation/);
 
-    // Verify Beta's location still exists
     const betaLocations = queryLocationsForUser("user-beta");
     assert.equal(betaLocations.length, 1);
+  });
+
+  it("allows a multi-tenant user to explicitly select and save to an active workspace", () => {
+    const locInBeta = insertLocationAsUser("user-multi", {
+      label: "Multi-User Beta Branch",
+      postcode: "KN010010101",
+      organization_id: "org-beta-2222",
+    });
+
+    assert.equal(locInBeta.organization_id, "org-beta-2222");
+
+    // Scoped query for Beta only
+    const betaLocations = queryLocationsForUser("user-multi", "org-beta-2222");
+    assert.ok(betaLocations.some((l) => l.label === "Multi-User Beta Branch"));
+  });
+
+  it("rejects attempt by user to save into an organization they do not belong to", () => {
+    assert.throws(
+      () => {
+        insertLocationAsUser("user-alpha", {
+          label: "Hijacked Org Location",
+          postcode: "LA010010101",
+          organization_id: "org-beta-2222", // user-alpha is not in beta
+        });
+      },
+      /Unauthorized: user is not a member of the specified organization/
+    );
   });
 
   it("allows Tenant Alpha to delete its own records", () => {

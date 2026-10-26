@@ -255,24 +255,32 @@ export function ExplorerTab({
                 <div className="flex items-center gap-2">
                   <span
                     className={`rounded-full px-3 py-1 text-xs font-bold ${
-                      lookup.status === "verified-by-provider"
+                      lookup.status === "provider_confirmed" || (lookup.status as string) === "verified-by-provider"
                         ? "bg-emerald-100 text-emerald-800"
-                        : lookup.status === "unconfirmed-provider-response"
+                        : lookup.status === "format_checked"
+                        ? "bg-blue-100 text-blue-800"
+                        : lookup.status === "unconfirmed_provider_response" || (lookup.status as string) === "unconfirmed-provider-response"
                         ? "bg-amber-100 text-amber-900"
+                        : lookup.status === "provider_unavailable"
+                        ? "bg-red-100 text-red-900"
                         : "bg-[#fff0e4] text-[#a85b24]"
                     }`}
                   >
-                    {lookup.status === "verified-by-provider"
+                    {lookup.status === "provider_confirmed" || (lookup.status as string) === "verified-by-provider"
                       ? "Official Provider Confirmed (NDAPS Active)"
-                      : lookup.status === "unconfirmed-provider-response"
-                      ? "Provider Schema Unconfirmed"
+                      : lookup.status === "format_checked"
+                      ? "11-Char Syntax Valid (Registry Query Pending)"
+                      : lookup.status === "unconfirmed_provider_response" || (lookup.status as string) === "unconfirmed-provider-response"
+                      ? "Provider Schema / Postcode Unconfirmed"
+                      : lookup.status === "provider_unavailable"
+                      ? "Provider Offline / Degraded"
                       : "Illustrative Simulation · Unconnected Upstream"}
                   </span>
                 </div>
               </div>
 
               {/* Simulation Notice Banner if not verified by authoritative provider */}
-              {lookup.status !== "verified-by-provider" && (
+              {lookup.status !== "provider_confirmed" && (lookup.status as string) !== "verified-by-provider" && (
                 <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-4 text-xs text-amber-900">
                   <div className="flex items-start gap-2.5">
                     <AlertCircle size={16} className="mt-0.5 shrink-0 text-amber-600" />
@@ -284,6 +292,11 @@ export function ExplorerTab({
                         This lookup was derived algorithmically from 11-character postal structural rules.
                         Ground coordinates, LGA boundaries, and facility classifications are illustrative simulations and have not been certified by an authoritative NDAPS server.
                       </p>
+                      {lookup.disclaimer && (
+                        <p className="text-[10px] text-amber-700 italic border-t border-amber-200/80 pt-1">
+                          {lookup.disclaimer}
+                        </p>
+                      )}
                     </div>
                   </div>
                 </div>

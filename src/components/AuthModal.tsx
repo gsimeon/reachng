@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { X, User, LogIn, LogOut, CheckCircle2, AlertCircle, Info, ShieldAlert } from "lucide-react";
+import { X, User, LogIn, LogOut, CheckCircle2, AlertCircle, Info, ShieldAlert, KeyRound } from "lucide-react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
 interface AuthModalProps {
@@ -34,61 +34,57 @@ export function AuthModal({
     e.preventDefault();
     if (!email.trim() || !password) return;
 
+    if (!supabaseConnected) {
+      setErrorMessage("Supabase cloud database is unconfigured. User authentication requires live Supabase credentials.");
+      return;
+    }
+
     setSubmitting(true);
     setErrorMessage("");
     setInfoMessage("");
 
-    if (supabaseConnected) {
-      const supabase = createSupabaseBrowserClient();
-      if (!supabase) {
-        setErrorMessage("Supabase client could not be initialized from environment variables.");
-        setSubmitting(false);
-        return;
-      }
+    const supabase = createSupabaseBrowserClient();
+    if (!supabase) {
+      setErrorMessage("Supabase client could not be initialized from environment variables.");
+      setSubmitting(false);
+      return;
+    }
 
-      try {
-        if (isSignUp) {
-          const { data, error } = await supabase.auth.signUp({
-            email: email.trim(),
-            password,
-            options: {
-              data: {
-                company_name: "ReachNG Enterprise Workspace",
-              },
+    try {
+      if (isSignUp) {
+        const { data, error } = await supabase.auth.signUp({
+          email: email.trim(),
+          password,
+          options: {
+            data: {
+              company_name: "ReachNG Enterprise Workspace",
             },
-          });
-          if (error) {
-            setErrorMessage(error.message);
-          } else if (data.session) {
-            onLogin(data.user?.email || email.trim());
-            onClose();
-          } else {
-            setInfoMessage("Registration successful! Check your email inbox to confirm your account before signing in.");
-          }
+          },
+        });
+        if (error) {
+          setErrorMessage(error.message);
+        } else if (data.session) {
+          onLogin(data.user?.email || email.trim());
+          onClose();
         } else {
-          const { data, error } = await supabase.auth.signInWithPassword({
-            email: email.trim(),
-            password,
-          });
-          if (error) {
-            setErrorMessage(error.message);
-          } else if (data.user?.email) {
-            onLogin(data.user.email);
-            onClose();
-          }
+          setInfoMessage("Registration initiated! Check your email inbox to confirm your account before signing in.");
         }
-      } catch (err) {
-        setErrorMessage(err instanceof Error ? err.message : "Authentication request failed.");
-      } finally {
-        setSubmitting(false);
+      } else {
+        const { data, error } = await supabase.auth.signInWithPassword({
+          email: email.trim(),
+          password,
+        });
+        if (error) {
+          setErrorMessage(error.message);
+        } else if (data.user?.email) {
+          onLogin(data.user.email);
+          onClose();
+        }
       }
-    } else {
-      // Local Demo Mode only when Supabase is not configured
-      setTimeout(() => {
-        onLogin(email.trim());
-        setSubmitting(false);
-        onClose();
-      }, 300);
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : "Authentication request failed.");
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -103,11 +99,6 @@ export function AuthModal({
     onClose();
   }
 
-  function handleDemoLogin(demoName: string) {
-    onLogin(demoName);
-    onClose();
-  }
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-xs">
       <div className="w-full max-w-md rounded-3xl border border-[var(--line)] bg-white p-6 sm:p-8 shadow-2xl animate-in fade-in zoom-in-95 duration-200">
@@ -118,10 +109,10 @@ export function AuthModal({
             </div>
             <div>
               <h2 className="text-base font-bold text-[var(--ink)]">
-                {userEmail ? "Account & Session" : isSignUp ? "Create Workspace Account" : "Operator Sign In"}
+                {userEmail ? "Active Account & Session" : supabaseConnected ? (isSignUp ? "Register Enterprise Account" : "Operator Sign In") : "Authentication Status"}
               </h2>
               <p className="text-xs text-[var(--muted)]">
-                {supabaseConnected ? "Supabase Cloud Authentication (PostgreSQL RLS)" : "Local Sandbox Mode (Unconnected Demo)"}
+                {supabaseConnected ? "Supabase Cloud Authentication (PostgreSQL RLS)" : "Local Sandbox Environment (Unconfigured Auth)"}
               </p>
             </div>
           </div>
@@ -132,18 +123,6 @@ export function AuthModal({
             <X size={18} />
           </button>
         </div>
-
-        {/* Status indicator banner */}
-        {!supabaseConnected && (
-          <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/70 p-3 text-xs text-amber-900">
-            <div className="flex items-start gap-2">
-              <ShieldAlert size={15} className="mt-0.5 shrink-0 text-amber-700" />
-              <div>
-                <span className="font-bold">Sandbox Demo Mode:</span> Supabase cloud database credentials are not configured in your environment. Operator sessions and locations are stored locally in the browser and will not persist to a PostgreSQL backend.
-              </div>
-            </div>
-          </div>
-        )}
 
         {errorMessage && (
           <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-800 flex items-start gap-2">
@@ -159,20 +138,17 @@ export function AuthModal({
           </div>
         )}
 
-        {userEmail ? (
+        {/* State 1: Active authenticated Supabase Session */}
+        {userEmail && supabaseConnected && (
           <div className="mt-5 space-y-4">
             <div className="rounded-2xl border border-emerald-200 bg-emerald-50/60 p-4 text-xs">
               <div className="flex items-center gap-2 text-emerald-900 font-bold">
                 <CheckCircle2 size={16} className="text-emerald-600" />
-                <span>
-                  {supabaseConnected ? "Authenticated Supabase Session" : "Local Sandbox Profile"}
-                </span>
+                <span>Authenticated Enterprise Session</span>
               </div>
               <div className="mt-1 font-mono text-sm font-semibold text-emerald-950">{userEmail}</div>
-              <div className="mt-2 text-[11px] text-emerald-800">
-                {supabaseConnected
-                  ? "Row Level Security Active: Location CRUD is scoped to your organization membership."
-                  : "Local storage fallback: Records remain in your browser session only."}
+              <div className="mt-2 text-[11px] text-emerald-800 leading-relaxed">
+                Row-Level Security (RLS) is active. Your location saves and reads are isolated strictly to your organization membership.
               </div>
             </div>
 
@@ -181,48 +157,14 @@ export function AuthModal({
               className="flex w-full items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 py-2.5 text-xs font-bold text-red-700 hover:bg-red-100 transition"
             >
               <LogOut size={15} />
-              <span>Sign Out</span>
+              <span>Sign Out of Supabase</span>
             </button>
           </div>
-        ) : (
+        )}
+
+        {/* State 2: Supabase Connected, Not Signed In */}
+        {!userEmail && supabaseConnected && (
           <div className="mt-5 space-y-4">
-            {/* Quick Demo Operator Buttons (Only in local demo mode) */}
-            {!supabaseConnected && (
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-wider text-[var(--subtle)]">
-                  Local Sandbox Profiles (Preview Only)
-                </label>
-                <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-                  <button
-                    type="button"
-                    onClick={() => handleDemoLogin("ops-manager@reachng.com")}
-                    className="rounded-xl border border-[var(--line)] bg-[#fafcf9] p-2.5 text-left font-medium text-[var(--ink)] hover:border-[var(--green)] hover:bg-[var(--green-soft)] transition"
-                  >
-                    <div className="font-bold text-[var(--green)]">Logistics Lead</div>
-                    <div className="text-[10px] text-[var(--muted)] truncate">ops-manager@reachng.com</div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleDemoLogin("developer@merchant.ng")}
-                    className="rounded-xl border border-[var(--line)] bg-[#fafcf9] p-2.5 text-left font-medium text-[var(--ink)] hover:border-[var(--green)] hover:bg-[var(--green-soft)] transition"
-                  >
-                    <div className="font-bold text-[var(--orange)]">API Engineer</div>
-                    <div className="text-[10px] text-[var(--muted)] truncate">developer@merchant.ng</div>
-                  </button>
-                </div>
-
-                <div className="relative my-4 flex items-center justify-center">
-                  <div className="absolute inset-0 flex items-center">
-                    <div className="w-full border-t border-[var(--line)]" />
-                  </div>
-                  <span className="relative bg-white px-2 text-[10px] font-bold uppercase text-[var(--subtle)]">
-                    Or Enter Email
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {/* Email form */}
             <form onSubmit={handleSubmit} className="space-y-3">
               <div>
                 <label className="mb-1 block text-xs font-bold text-[var(--ink)]">Work Email</label>
@@ -256,29 +198,67 @@ export function AuthModal({
                 <LogIn size={15} />
                 <span>
                   {submitting
-                    ? "Processing..."
+                    ? "Authenticating..."
                     : isSignUp
-                    ? "Register Workspace Account"
+                    ? "Create Workspace & Register"
                     : "Sign In to Workspace"}
                 </span>
               </button>
             </form>
 
-            {supabaseConnected && (
-              <div className="text-center">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsSignUp(!isSignUp);
-                    setErrorMessage("");
-                    setInfoMessage("");
-                  }}
-                  className="text-xs text-[var(--green)] font-semibold hover:underline"
-                >
-                  {isSignUp ? "Already have an account? Sign in" : "Need a workspace account? Sign up"}
-                </button>
+            <div className="text-center pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsSignUp(!isSignUp);
+                  setErrorMessage("");
+                  setInfoMessage("");
+                }}
+                className="text-xs text-[var(--green)] font-semibold hover:underline"
+              >
+                {isSignUp ? "Already have an account? Sign in" : "Need a new tenant workspace? Sign up"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* State 3: Supabase NOT configured -> Truthful Unauthenticated Sandbox Mode */}
+        {!supabaseConnected && (
+          <div className="mt-5 space-y-4">
+            <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-4 text-xs text-amber-950">
+              <div className="flex items-start gap-2.5">
+                <ShieldAlert size={18} className="mt-0.5 shrink-0 text-amber-700" />
+                <div className="space-y-1">
+                  <div className="font-bold text-amber-950">Supabase Cloud Auth Not Configured</div>
+                  <p className="text-[11px] leading-relaxed text-amber-800">
+                    Live operator authentication and cloud PostgreSQL persistence require valid Supabase project credentials in <code className="rounded bg-amber-100 px-1 py-0.5 font-mono text-[10px]">.env.local</code>.
+                  </p>
+                </div>
               </div>
-            )}
+
+              <div className="mt-3 rounded-xl border border-amber-200/80 bg-white/70 p-3 text-[11px] text-amber-900 space-y-1.5 font-mono">
+                <div>NEXT_PUBLIC_SUPABASE_URL=https://&lt;project&gt;.supabase.co</div>
+                <div>NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...</div>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-[var(--line)] bg-[#fafcf9] p-3 text-xs text-[var(--muted)]">
+              <div className="flex items-center gap-2 text-[var(--ink)] font-bold mb-1">
+                <KeyRound size={14} className="text-[var(--green)]" />
+                <span>Public Sandbox Access</span>
+              </div>
+              <p className="text-[11px] leading-relaxed">
+                You can explore postcode resolution, the national directory, corridor distance calculations, and batch validation in demo mode without creating an account.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex w-full items-center justify-center gap-2 rounded-xl bg-[var(--green)] py-2.5 text-xs font-bold text-white shadow-sm hover:bg-[var(--green-hover)] transition"
+            >
+              <span>Continue in Sandbox Mode</span>
+            </button>
           </div>
         )}
       </div>

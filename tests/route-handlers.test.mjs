@@ -16,6 +16,7 @@ const locationInputSchema = z.object({
   postcode: z.string().trim().regex(/^[A-Za-z0-9]{11}$/),
   address: z.string().trim().max(300).optional().default(""),
   category: z.enum(["Fulfilment Hub", "Retail Store", "Pickup Station", "Dispatch Office"]).optional().default("Fulfilment Hub"),
+  organization_id: z.string().uuid().optional(),
 });
 
 describe("POST /api/postcode route behavior", () => {
@@ -104,16 +105,28 @@ describe("Location CRUD route authorization & validation", () => {
     assert.equal(locationInputSchema.safeParse(badLabel).success, false);
   });
 
-  it("prevents client from injecting a foreign organization_id", () => {
+  it("rejects malformed organization_id with 422 validation failure", () => {
     const clientPayload = {
       label: "Hijacked Location",
       postcode: "LA010010101",
-      organization_id: "victim-org-9999", // Malicious client attempt
+      organization_id: "not-a-valid-uuid",
     };
 
-    // The route schema strips/ignores client-provided organization_id
     const parsed = locationInputSchema.safeParse(clientPayload);
+    assert.equal(parsed.success, false);
+  });
+
+  it("permits valid UUID organization_id for server-side membership authorization", () => {
+    const validPayload = {
+      label: "Legitimate Tenant Location",
+      postcode: "LA010010101",
+      organization_id: "123e4567-e89b-42d3-a456-426614174000",
+    };
+
+    const parsed = locationInputSchema.safeParse(validPayload);
     assert.equal(parsed.success, true);
-    assert.equal("organization_id" in parsed.data, false);
+    if (parsed.success) {
+      assert.equal(parsed.data.organization_id, "123e4567-e89b-42d3-a456-426614174000");
+    }
   });
 });

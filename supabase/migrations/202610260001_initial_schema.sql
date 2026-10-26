@@ -134,27 +134,38 @@ begin
 end;
 $$;
 
--- 9. Trigger: Server-side Organization Assignment on Location Insert
+-- 9. Trigger: Server-side Organization Assignment & Membership Validation on Location Insert
 create or replace function public.assign_location_organization()
 returns trigger language plpgsql security invoker set search_path = ''
 as $$
-declare org_id uuid;
+declare fallback_org_id uuid;
 begin
   if new.created_by is distinct from auth.uid() then
     raise exception 'Invalid creator ID: must match authenticated user';
   end if;
 
-  -- Determine user's active organization membership
-  select organization_id into org_id
+  -- If caller specified a target workspace, verify membership
+  if new.organization_id is not null then
+    if not exists (
+      select 1 from public.organization_members
+      where organization_id = new.organization_id and user_id = auth.uid()
+    ) then
+      raise exception 'Unauthorized: user is not a member of the specified organization';
+    end if;
+    return new;
+  end if;
+
+  -- Otherwise, determine user's default/primary organization membership
+  select organization_id into fallback_org_id
   from public.organization_members
   where user_id = auth.uid()
   order by created_at asc limit 1;
 
-  if org_id is null then
+  if fallback_org_id is null then
     raise exception 'No active workspace found for user. Complete workspace onboarding first.';
   end if;
 
-  new.organization_id := org_id;
+  new.organization_id := fallback_org_id;
   return new;
 end;
 $$;

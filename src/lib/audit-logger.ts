@@ -1,6 +1,7 @@
 /**
  * Structured enterprise audit logger & telemetry emitter for ReachNG.
  * Produces structured JSON output with secret sanitization and PII masking.
+ * Supports dual-sink output: stdout (container log ingestors) and durable PostgreSQL table (when Supabase active).
  */
 
 export type AuditLogLevel = "info" | "warn" | "error";
@@ -19,6 +20,8 @@ export interface AuditEventPayload {
   clientIp?: string;
   statusCode?: number;
   durationMs?: number;
+  organizationId?: string | null;
+  actorId?: string | null;
   metadata?: Record<string, unknown>;
 }
 
@@ -30,6 +33,8 @@ export interface StructuredAuditLog {
   clientIp: string;
   statusCode: number;
   durationMs?: number;
+  organizationId?: string | null;
+  actorId?: string | null;
   metadata: Record<string, unknown>;
 }
 
@@ -88,18 +93,37 @@ export function sanitizeMetadata(data?: Record<string, unknown>): Record<string,
   return sanitized;
 }
 
+export interface DurableAuditSink {
+  from(table: string): {
+    insert(payload: Record<string, unknown>): Promise<{ error: unknown }>;
+  };
+}
+
 /**
  * Record a structured audit event.
+ * If a durable sink (Supabase client) is provided, also attempts to persist to public.audit_events.
  */
-export function recordAuditEvent(event: AuditEventPayload): StructuredAuditLog {
+export function recordAuditEvent(event: AuditEventPayload, durableSink?: DurableAuditSink): StructuredAuditLog {
   const log: StructuredAuditLog = {
     timestamp: new Date().toISOString(),
-    level: event.level ?? (event.statusCode && event.statusCode >= 500 ? "error" : event.statusCode && event.statusCode >= 400 ? "warn" : "info"),
+    level:
+      event.level ??
+      (event.statusCode && event.statusCode >= 500
+        ? "error"
+        : event.statusCode && event.statusCode >= 400
+        ? "warn"
+        : "info"),
     eventType: event.eventType,
-    requestId: event.requestId || (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `req_${Date.now()}`),
+    requestId:
+      event.requestId ||
+      (typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `req_${Date.now()}`),
     clientIp: maskIp(event.clientIp),
     statusCode: event.statusCode ?? 200,
     durationMs: event.durationMs !== undefined ? Math.round(event.durationMs) : undefined,
+    organizationId: event.organizationId ?? null,
+    actorId: event.actorId ?? null,
     metadata: sanitizeMetadata(event.metadata),
   };
 
@@ -109,7 +133,7 @@ export function recordAuditEvent(event: AuditEventPayload): StructuredAuditLog {
     auditLogBuffer.pop();
   }
 
-  // Write structured JSON to stdout for log ingestors (DataDog, CloudWatch, GCP Logging)
+  // Dual-sink: standard JSON stdout for container log ingestors
   if (process.env.NODE_ENV !== "test") {
     const formatted = JSON.stringify(log);
     if (log.level === "error") {
@@ -119,6 +143,30 @@ export function recordAuditEvent(event: AuditEventPayload): StructuredAuditLog {
     } else {
       console.log(formatted);
     }
+  }
+
+  // Durable sink write to PostgreSQL audit_events (non-blocking async)
+  if (durableSink) {
+    void durableSink
+      .from("audit_events")
+      .insert({
+        organization_id: log.organizationId,
+        actor_id: log.actorId,
+        action: log.eventType,
+        resource_type: log.eventType.split(".")[0] || "system",
+        metadata: {
+          requestId: log.requestId,
+          clientIp: log.clientIp,
+          statusCode: log.statusCode,
+          durationMs: log.durationMs,
+          ...log.metadata,
+        },
+      })
+      .catch((err) => {
+        if (process.env.NODE_ENV !== "test") {
+          console.warn("[audit-logger] Warning: durable sink write failed:", err instanceof Error ? err.message : err);
+        }
+      });
   }
 
   return log;
