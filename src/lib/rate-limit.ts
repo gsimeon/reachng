@@ -147,7 +147,7 @@ export class SlidingWindowRateLimiter {
  * if configured, or the rightmost proxy hop is used.
  */
 export function getClientIp(request: Request): string {
-  // If explicitly configured for specific cloud host (e.g. Cloudflare, Vercel, Fly.io)
+  // If explicitly configured for specific cloud edge host (Cloudflare, Vercel, Fly.io)
   const cfIp = request.headers.get("cf-connecting-ip");
   if (cfIp && cfIp.trim()) return cfIp.trim();
 
@@ -159,6 +159,11 @@ export function getClientIp(request: Request): string {
 
   const realIp = request.headers.get("x-real-ip");
   if (realIp && realIp.trim()) return realIp.trim();
+
+  // In production environments requiring verified proxy chains, drop unauthenticated x-forwarded-for
+  if (process.env.REQUIRE_TRUSTED_PROXY === "true") {
+    return "anonymous-client";
+  }
 
   const forwarded = request.headers.get("x-forwarded-for");
   if (forwarded) {

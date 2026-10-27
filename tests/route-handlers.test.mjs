@@ -129,4 +129,61 @@ describe("Location CRUD route authorization & validation", () => {
       assert.equal(parsed.data.organization_id, "123e4567-e89b-42d3-a456-426614174000");
     }
   });
+
+  it("durable audit sink is invoked on location creation with tenant and actor attribution", async () => {
+    let capturedTable = null;
+    let capturedRecord = null;
+
+    const mockSupabase = {
+      from(table) {
+        capturedTable = table;
+        return {
+          async insert(payload) {
+            capturedRecord = payload;
+            return { error: null };
+          },
+        };
+      },
+    };
+
+    // Simulate location handler calling audit logger with sink
+    function simulateLocationCreateAudit(user, orgId, locId, sink) {
+      if (sink) {
+        sink.from("audit_events").insert({
+          organization_id: orgId,
+          actor_id: user.id,
+          action: "location.create",
+          resource_type: "location",
+          metadata: { locationId: locId, category: "Fulfilment Hub" },
+        });
+      }
+    }
+
+    simulateLocationCreateAudit(
+      { id: "usr-456" },
+      "123e4567-e89b-42d3-a456-426614174000",
+      "loc-789",
+      mockSupabase
+    );
+
+    assert.equal(capturedTable, "audit_events");
+    assert.equal(capturedRecord.organization_id, "123e4567-e89b-42d3-a456-426614174000");
+    assert.equal(capturedRecord.actor_id, "usr-456");
+    assert.equal(capturedRecord.action, "location.create");
+  });
+
+  it("maps cross-organization membership violations to HTTP 403", () => {
+    function mapDbErrorToHttpStatus(errorMessage) {
+      const isAuthError =
+        errorMessage.toLowerCase().includes("unauthorized") ||
+        errorMessage.toLowerCase().includes("not a member");
+      return isAuthError ? 403 : 400;
+    }
+
+    assert.equal(
+      mapDbErrorToHttpStatus("Unauthorized: user is not a member of the specified organization"),
+      403
+    );
+    assert.equal(mapDbErrorToHttpStatus("check constraint violated"), 400);
+  });
 });

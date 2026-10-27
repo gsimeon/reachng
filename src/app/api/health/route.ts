@@ -58,14 +58,17 @@ export async function GET() {
         configured: supabaseConfigured,
         reachable: dbReachable,
         latencyMs: dbLatencyMs,
-        error: dbError,
+        // Generic client-safe error code; internal error details are kept in server logs only
+        error: dbError ? "DATABASE_UNAVAILABLE" : undefined,
         provider: supabaseConfigured ? "supabase-cloud" : "local-browser-fallback",
-        rlsEnforced: supabaseConfigured && dbReachable,
+        rlsPolicyConfigured: supabaseConfigured,
+        rlsEnforcementVerified: false, // Requires live tenant probe execution
       },
       ndapsProvider: {
         configured: ndapsConfigured,
-        status: ndapsConfigured ? "live" : "simulated",
-        mode: ndapsConfigured ? "authoritative" : "illustrative-fallback",
+        status: ndapsConfigured ? "configured" : "unconfigured",
+        mode: ndapsConfigured ? "provider-sandbox" : "illustrative-fallback",
+        registryVerified: false, // Authoritative verification requires official NIPOST sandbox confirmation
         endpointHost: hasNdapsBase
           ? new URL(process.env.NDAPS_API_BASE_URL!).hostname
           : "unconfigured",
@@ -82,6 +85,7 @@ export async function GET() {
       auditLogger: {
         status: "operational",
         sink: supabaseConfigured && dbReachable ? "dual (stdout + postgresql)" : "stdout-json",
+        durableWritesActive: supabaseConfigured && dbReachable,
         recentEventCount: recentLogs.length,
       },
       security: {

@@ -101,6 +101,71 @@ function sanitizeMetadata(data) {
   return sanitized;
 }
 
+function getClientIp(headers) {
+  const get = (k) => headers[k] || headers[k.toLowerCase()];
+  const cfIp = get("cf-connecting-ip");
+  if (cfIp && cfIp.trim()) return cfIp.trim();
+
+  const vercelIp = get("x-vercel-ip");
+  if (vercelIp && vercelIp.trim()) return vercelIp.trim();
+
+  const flyIp = get("fly-client-ip");
+  if (flyIp && flyIp.trim()) return flyIp.trim();
+
+  const realIp = get("x-real-ip");
+  if (realIp && realIp.trim()) return realIp.trim();
+
+  const forwarded = get("x-forwarded-for");
+  if (forwarded) {
+    const firstIp = forwarded.split(",")[0]?.trim();
+    if (firstIp && /^[0-9a-fA-F:.]+$/.test(firstIp)) {
+      return firstIp;
+    }
+  }
+
+  return "anonymous-client";
+}
+
+function recordAuditEvent(event, durableSink) {
+  const log = {
+    timestamp: new Date().toISOString(),
+    level: event.level ?? (event.statusCode >= 500 ? "error" : event.statusCode >= 400 ? "warn" : "info"),
+    eventType: event.eventType,
+    requestId: event.requestId || "req_test",
+    clientIp: maskIp(event.clientIp),
+    statusCode: event.statusCode ?? 200,
+    durationMs: event.durationMs,
+    organizationId: event.organizationId ?? null,
+    actorId: event.actorId ?? null,
+    metadata: sanitizeMetadata(event.metadata),
+  };
+
+  if (durableSink) {
+    return Promise.resolve(
+      durableSink.from("audit_events").insert({
+        organization_id: log.organizationId,
+        actor_id: log.actorId,
+        action: log.eventType,
+        resource_type: log.eventType.split(".")[0] || "system",
+        metadata: {
+          requestId: log.requestId,
+          clientIp: log.clientIp,
+          statusCode: log.statusCode,
+          durationMs: log.durationMs,
+          ...log.metadata,
+        },
+      })
+    ).then((res) => {
+      const err = res?.error;
+      return { log, durablePersisted: !err, error: err || null };
+    }).catch((err) => {
+      return { log, durablePersisted: false, error: err };
+    });
+  }
+
+  return Promise.resolve({ log, durablePersisted: false, error: null });
+}
+
 // --- Test Suites ---
 
 describe("Sliding Window Rate Limiter", () => {
@@ -210,6 +275,118 @@ describe("Enterprise Audit Logging & Sanitization", () => {
     assert.equal(sanitized.headerSample, "[REDACTED]");
     assert.equal(sanitized.jwtString, "[REDACTED]");
   });
+
+  it("persists audit events to durable sink with sanitized metadata and tenant attribution", async () => {
+    let capturedTable = null;
+    let capturedPayload = null;
+
+    const mockDurableSink = {
+      from(table) {
+        capturedTable = table;
+        return {
+          async insert(payload) {
+            capturedPayload = payload;
+            return { error: null };
+          },
+        };
+      },
+    };
+
+    const result = await recordAuditEvent(
+      {
+        eventType: "location.create",
+        clientIp: "197.210.65.14",
+        statusCode: 201,
+        durationMs: 42,
+        organizationId: "123e4567-e89b-42d3-a456-426614174000",
+        actorId: "user-alpha",
+        metadata: {
+          locationId: "loc-123",
+          category: "Fulfilment Hub",
+          apiKey: "secret-key-to-redact",
+        },
+      },
+      mockDurableSink
+    );
+
+    assert.equal(result.durablePersisted, true);
+    assert.equal(capturedTable, "audit_events");
+    assert.equal(capturedPayload.organization_id, "123e4567-e89b-42d3-a456-426614174000");
+    assert.equal(capturedPayload.actor_id, "user-alpha");
+    assert.equal(capturedPayload.action, "location.create");
+    assert.equal(capturedPayload.resource_type, "location");
+    assert.equal(capturedPayload.metadata.clientIp, "197.210.65.xxx");
+    assert.equal(capturedPayload.metadata.apiKey, "[REDACTED]");
+  });
+
+  it("makes durable sink write failures observable without crashing caller", async () => {
+    const errorSink = {
+      from() {
+        return {
+          async insert() {
+            return { error: { message: "database connection timeout", code: "PGRST000" } };
+          },
+        };
+      },
+    };
+
+    const result = await recordAuditEvent(
+      {
+        eventType: "location.create",
+        clientIp: "10.0.0.1",
+        statusCode: 500,
+      },
+      errorSink
+    );
+
+    assert.equal(result.durablePersisted, false);
+    assert.ok(result.error !== null);
+    assert.equal(result.error.code, "PGRST000");
+  });
+
+  it("handles durable sink promise rejections safely", async () => {
+    const rejectingSink = {
+      from() {
+        return {
+          async insert() {
+            throw new Error("Network socket destroyed");
+          },
+        };
+      },
+    };
+
+    const result = await recordAuditEvent(
+      { eventType: "system.health", clientIp: "127.0.0.1" },
+      rejectingSink
+    );
+
+    assert.equal(result.durablePersisted, false);
+    assert.match(result.error.message, /Network socket destroyed/);
+  });
+});
+
+describe("Trusted Reverse-Proxy Header Sanitization", () => {
+  it("prioritizes trusted cloud edge headers over spoofed X-Forwarded-For", () => {
+    const headers = {
+      "cf-connecting-ip": "102.89.33.201",
+      "x-forwarded-for": "1.2.3.4, 5.6.7.8",
+    };
+    assert.equal(getClientIp(headers), "102.89.33.201");
+  });
+
+  it("sanitizes X-Forwarded-For and extracts leftmost valid client IP", () => {
+    const headers = {
+      "x-forwarded-for": "197.210.65.14, 10.0.0.1, 172.16.0.1",
+    };
+    assert.equal(getClientIp(headers), "197.210.65.14");
+  });
+
+  it("falls back to anonymous-client on invalid or malformed proxy headers", () => {
+    const headers = {
+      "x-forwarded-for": "<script>alert(1)</script>",
+    };
+    assert.equal(getClientIp(headers), "anonymous-client");
+  });
 });
 
 describe("System Health & Diagnostic Telemetry Schema", () => {
@@ -225,12 +402,14 @@ describe("System Health & Diagnostic Telemetry Schema", () => {
         latencyMs: z.number().optional(),
         error: z.string().optional(),
         provider: z.string(),
-        rlsEnforced: z.boolean(),
+        rlsPolicyConfigured: z.boolean(),
+        rlsEnforcementVerified: z.boolean(),
       }),
       ndapsProvider: z.object({
         configured: z.boolean(),
-        status: z.enum(["live", "simulated"]),
-        mode: z.enum(["authoritative", "illustrative-fallback"]),
+        status: z.enum(["configured", "unconfigured"]),
+        mode: z.enum(["provider-sandbox", "illustrative-fallback"]),
+        registryVerified: z.boolean(),
         endpointHost: z.string(),
       }),
       rateLimiter: z.object({
@@ -241,6 +420,7 @@ describe("System Health & Diagnostic Telemetry Schema", () => {
       auditLogger: z.object({
         status: z.literal("operational"),
         sink: z.string(),
+        durableWritesActive: z.boolean().optional(),
         recentEventCount: z.number().nonnegative(),
       }),
       security: z.object({
@@ -265,12 +445,14 @@ describe("System Health & Diagnostic Telemetry Schema", () => {
           reachable: true,
           latencyMs: 18,
           provider: "supabase-cloud",
-          rlsEnforced: true,
+          rlsPolicyConfigured: true,
+          rlsEnforcementVerified: false,
         },
         ndapsProvider: {
           configured: false,
-          status: "simulated",
+          status: "unconfigured",
           mode: "illustrative-fallback",
+          registryVerified: false,
           endpointHost: "unconfigured",
         },
         rateLimiter: {
@@ -285,6 +467,7 @@ describe("System Health & Diagnostic Telemetry Schema", () => {
         auditLogger: {
           status: "operational",
           sink: "dual (stdout + postgresql)",
+          durableWritesActive: true,
           recentEventCount: 12,
         },
         security: {

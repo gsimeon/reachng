@@ -95,7 +95,7 @@ export function sanitizeMetadata(data?: Record<string, unknown>): Record<string,
 
 export interface DurableAuditSink {
   from(table: string): {
-    insert(payload: Record<string, unknown>): Promise<{ error: unknown }>;
+    insert(payload: Record<string, unknown>): PromiseLike<{ error?: unknown } | unknown> | { error?: unknown };
   };
 }
 
@@ -147,9 +147,8 @@ export function recordAuditEvent(event: AuditEventPayload, durableSink?: Durable
 
   // Durable sink write to PostgreSQL audit_events (non-blocking async)
   if (durableSink) {
-    void durableSink
-      .from("audit_events")
-      .insert({
+    Promise.resolve(
+      durableSink.from("audit_events").insert({
         organization_id: log.organizationId,
         actor_id: log.actorId,
         action: log.eventType,
@@ -161,6 +160,13 @@ export function recordAuditEvent(event: AuditEventPayload, durableSink?: Durable
           durationMs: log.durationMs,
           ...log.metadata,
         },
+      })
+    )
+      .then((res) => {
+        const potentialError = (res as { error?: unknown })?.error;
+        if (potentialError && process.env.NODE_ENV !== "test") {
+          console.warn("[audit-logger] Warning: durable sink write returned error:", potentialError);
+        }
       })
       .catch((err) => {
         if (process.env.NODE_ENV !== "test") {

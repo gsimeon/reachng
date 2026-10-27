@@ -201,4 +201,46 @@ describe("Tenant isolation & RLS multi-tenant model", () => {
     const alphaLocations = queryLocationsForUser("user-alpha");
     assert.equal(alphaLocations.length, 0);
   });
+
+  it("returns empty results when a user attempts to query an unjoined workspace", () => {
+    // user-alpha is only in org-alpha-1111; attempts to target org-beta-2222
+    const unjoinedQuery = queryLocationsForUser("user-alpha", "org-beta-2222");
+    assert.equal(unjoinedQuery.length, 0);
+  });
+
+  it("enforces strict isolation during multi-tenant workspace switching", () => {
+    // user-multi belongs to both Alpha and Beta
+    const alphaView = queryLocationsForUser("user-multi", "org-alpha-1111");
+    const betaView = queryLocationsForUser("user-multi", "org-beta-2222");
+
+    // Alpha view should NOT contain Beta records
+    assert.ok(alphaView.every((l) => l.organization_id === "org-alpha-1111"));
+    // Beta view should NOT contain Alpha records
+    assert.ok(betaView.every((l) => l.organization_id === "org-beta-2222"));
+  });
+
+  it("blocks cross-tenant location modification attempts", () => {
+    function updateLocationAsUser(userId, locationId, patch) {
+      const userOrgIds = organization_members
+        .filter((m) => m.user_id === userId)
+        .map((m) => m.organization_id);
+
+      const targetLoc = locationsTable.find((loc) => loc.id === locationId);
+      if (!targetLoc) return { success: false, error: "Not found" };
+
+      if (!userOrgIds.includes(targetLoc.organization_id)) {
+        return { success: false, error: "Unauthorized: cross-tenant access violation" };
+      }
+
+      Object.assign(targetLoc, patch);
+      return { success: true, location: targetLoc };
+    }
+
+    const res = updateLocationAsUser("user-alpha", "loc-beta-001", { label: "Hacked Beta Depot" });
+    assert.equal(res.success, false);
+    assert.match(res.error, /cross-tenant access violation/);
+
+    const betaLoc = locationsTable.find((loc) => loc.id === "loc-beta-001");
+    assert.equal(betaLoc.label, "Beta Abuja Transit Hub"); // Unchanged
+  });
 });

@@ -66,8 +66,10 @@ export async function GET(request: Request) {
       clientIp,
       statusCode: 500,
       durationMs,
+      organizationId: targetOrgId ?? null,
+      actorId: user.id,
       metadata: { userId: user.id },
-    });
+    }, supabase);
     return NextResponse.json({ error: "Could not load locations." }, { status: 500, headers: rateLimitHeaders });
   }
 
@@ -78,8 +80,10 @@ export async function GET(request: Request) {
     clientIp,
     statusCode: 200,
     durationMs,
+    organizationId: targetOrgId ?? null,
+    actorId: user.id,
     metadata: { userId: user.id, count: data?.length ?? 0, targetOrgId: targetOrgId || "all-memberships" },
-  });
+  }, supabase);
 
   return NextResponse.json({ locations: data }, { status: 200, headers: rateLimitHeaders });
 }
@@ -153,10 +157,19 @@ export async function POST(request: Request) {
       clientIp,
       statusCode: status,
       durationMs,
+      organizationId: parsed.data.organization_id ?? null,
+      actorId: user.id,
       metadata: { userId: user.id, category: parsed.data.category, error: error.message },
-    });
+    }, supabase);
 
-    return NextResponse.json({ error: `Could not save location: ${error.message}` }, { status, headers: rateLimitHeaders });
+    const clientSafeMessage = isAuthError
+      ? "You do not have permission to add locations to this workspace."
+      : "Could not save location. Please check the provided information and try again.";
+
+    return NextResponse.json(
+      { error: clientSafeMessage, code: isAuthError ? "UNAUTHORIZED" : "SAVE_FAILED" },
+      { status, headers: rateLimitHeaders }
+    );
   }
 
   recordAuditEvent({
@@ -166,8 +179,10 @@ export async function POST(request: Request) {
     clientIp,
     statusCode: 201,
     durationMs,
+    organizationId: (data?.organization_id as string | undefined) ?? null,
+    actorId: user.id,
     metadata: { userId: user.id, locationId: data?.id, organizationId: data?.organization_id, category: parsed.data.category },
-  });
+  }, supabase);
 
   return NextResponse.json({ location: data }, { status: 201, headers: rateLimitHeaders });
 }
@@ -207,8 +222,9 @@ export async function DELETE(request: Request) {
       clientIp,
       statusCode: 400,
       durationMs,
+      actorId: user.id,
       metadata: { userId: user.id, locationId: id },
-    });
+    }, supabase);
     return NextResponse.json({ error: "Could not delete location." }, { status: 400, headers: rateLimitHeaders });
   }
 
@@ -219,8 +235,9 @@ export async function DELETE(request: Request) {
     clientIp,
     statusCode: 200,
     durationMs,
+    actorId: user.id,
     metadata: { userId: user.id, locationId: id },
-  });
+  }, supabase);
 
   return NextResponse.json({ success: true }, { status: 200, headers: rateLimitHeaders });
 }

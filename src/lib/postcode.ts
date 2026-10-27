@@ -86,10 +86,13 @@ export async function lookupPostcode(rawPostcode: string): Promise<LookupResult>
     };
   }
 
-  // API contract is configuration-driven. Confirm the official provider's path,
-  // request method, query parameter, and response schema before production usage.
+  // API contract supports official NIPOST query param (?code=...) and fallback (?postcode=...)
   const url = new URL(lookupPath, baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
-  url.searchParams.set("postcode", postcode);
+  const queryParam = process.env.NDAPS_QUERY_PARAM || "code";
+  url.searchParams.set(queryParam, postcode);
+  if (queryParam !== "postcode") {
+    url.searchParams.set("postcode", postcode);
+  }
 
   const headerName = process.env.NDAPS_AUTH_HEADER || "Authorization";
   const scheme = process.env.NDAPS_AUTH_SCHEME ?? "Bearer";
