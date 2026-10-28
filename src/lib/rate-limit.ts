@@ -46,11 +46,11 @@ export class InMemoryRateLimitStore implements RateLimitStore {
       const resetAt = now + windowMs;
       const newBucket = { count: 1, resetAt };
       this.buckets.set(key, newBucket);
-      return newBucket;
+      return { count: 1, resetAt };
     }
 
     bucket.count += 1;
-    return bucket;
+    return { count: bucket.count, resetAt: bucket.resetAt };
   }
 
   public reset(key?: string): void {
@@ -87,11 +87,11 @@ export class SharedRateLimitStore implements RateLimitStore {
       const resetAt = now + windowMs;
       const newBucket = { count: 1, resetAt };
       SharedRateLimitStore.globalBuckets.set(key, newBucket);
-      return newBucket;
+      return { count: 1, resetAt };
     }
 
     bucket.count += 1;
-    return bucket;
+    return { count: bucket.count, resetAt: bucket.resetAt };
   }
 
   public reset(key?: string): void {
@@ -101,6 +101,88 @@ export class SharedRateLimitStore implements RateLimitStore {
       SharedRateLimitStore.globalBuckets.clear();
     }
   }
+}
+
+/**
+ * Genuinely distributed atomic rate-limit store for serverless & multi-region deployments
+ * using Upstash Redis REST API or compatible Redis HTTP proxy.
+ * Executes atomic increment and TTL assignment over HTTP without persistent TCP sockets.
+ */
+export class UpstashRedisRateLimitStore implements RateLimitStore {
+  private readonly url: string;
+  private readonly token: string;
+
+  constructor(url: string, token: string) {
+    this.url = url.replace(/\/$/, "");
+    this.token = token;
+  }
+
+  public async increment(key: string, windowMs: number): Promise<{ count: number; resetAt: number }> {
+    const now = Date.now();
+    const resetAt = now + windowMs;
+    const expireSeconds = Math.max(1, Math.ceil(windowMs / 1000));
+
+    try {
+      // Atomic pipeline: INCR key, then EXPIRE key expireSeconds NX (only if no expiry set)
+      const res = await fetch(`${this.url}/pipeline`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify([
+          ["INCR", `ratelimit:${key}`],
+          ["EXPIRE", `ratelimit:${key}`, expireSeconds, "NX"],
+        ]),
+        cache: "no-store",
+      });
+
+      if (!res.ok) {
+        throw new Error(`Upstash returned HTTP ${res.status}`);
+      }
+
+      const data = (await res.json()) as Array<{ result?: unknown }>;
+      const count = typeof data?.[0]?.result === "number" ? data[0].result : 1;
+      return { count, resetAt };
+    } catch {
+      // Fail-open defensively in edge network partitions to avoid taking down APIs
+      return { count: 1, resetAt };
+    }
+  }
+
+  public async reset(key?: string): Promise<void> {
+    if (!key) return;
+    try {
+      await fetch(`${this.url}/DEL/${encodeURIComponent(`ratelimit:${key}`)}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${this.token}` },
+        cache: "no-store",
+      });
+    } catch {
+      // Ignore
+    }
+  }
+}
+
+/**
+ * Factory creating the configured rate limit store:
+ * 1. Upstash Redis REST when UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN are set (production distributed)
+ * 2. SharedRateLimitStore when RATE_LIMIT_STORE is set to "shared" (process-shared for testing)
+ * 3. InMemoryRateLimitStore by default (local development)
+ */
+export function createDefaultRateLimitStore(): RateLimitStore {
+  const upstashUrl = process.env.UPSTASH_REDIS_REST_URL;
+  const upstashToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+
+  if (upstashUrl && upstashToken && !upstashUrl.includes("YOUR_UPSTASH")) {
+    return new UpstashRedisRateLimitStore(upstashUrl, upstashToken);
+  }
+
+  if (process.env.RATE_LIMIT_STORE === "shared") {
+    return new SharedRateLimitStore();
+  }
+
+  return new InMemoryRateLimitStore();
 }
 
 export class SlidingWindowRateLimiter {
@@ -113,43 +195,16 @@ export class SlidingWindowRateLimiter {
     this.baseLimit = options.limit;
     this.authenticatedLimit = options.authenticatedLimit ?? options.limit * 5;
     this.windowMs = options.windowMs;
-    this.store = store ?? new InMemoryRateLimitStore();
+    this.store = store ?? createDefaultRateLimitStore();
   }
 
   /**
-   * Check whether a client request is permitted under this rate limiter (sync).
-   * If isAuthenticated is true (e.g. authenticated organization or verified API key),
+   * Primary asynchronous rate limit check.
+   * Awaits both distributed network stores (Upstash Redis) and in-memory stores.
+   * If isAuthenticated is true (verified session and organization membership),
    * the higher authenticatedLimit quota is applied.
    */
-  public check(identifier: string, isAuthenticated = false): RateLimitResult {
-    const limit = isAuthenticated ? this.authenticatedLimit : this.baseLimit;
-    const now = Date.now();
-
-    const incrementResult = this.store.increment(identifier, this.windowMs);
-    const { count, resetAt } = incrementResult instanceof Promise ? { count: 1, resetAt: now + this.windowMs } : incrementResult;
-    const resetSeconds = Math.max(1, Math.ceil((resetAt - now) / 1000));
-
-    if (count > limit) {
-      return {
-        success: false,
-        limit,
-        remaining: 0,
-        reset: resetSeconds,
-      };
-    }
-
-    return {
-      success: true,
-      limit,
-      remaining: Math.max(0, limit - count),
-      reset: resetSeconds,
-    };
-  }
-
-  /**
-   * Async check for distributed stores (e.g., Redis, Upstash, or database KV).
-   */
-  public async checkAsync(identifier: string, isAuthenticated = false): Promise<RateLimitResult> {
+  public async check(identifier: string, isAuthenticated = false): Promise<RateLimitResult> {
     const limit = isAuthenticated ? this.authenticatedLimit : this.baseLimit;
     const now = Date.now();
 
@@ -171,6 +226,65 @@ export class SlidingWindowRateLimiter {
       remaining: Math.max(0, limit - count),
       reset: resetSeconds,
     };
+  }
+
+  /**
+   * Synchronous check helper for in-memory unit tests only.
+   * Throws if invoked with an asynchronous distributed store.
+   */
+  public checkSync(identifier: string, isAuthenticated = false): RateLimitResult {
+    const limit = isAuthenticated ? this.authenticatedLimit : this.baseLimit;
+    const now = Date.now();
+
+    const incrementResult = this.store.increment(identifier, this.windowMs);
+    if (incrementResult instanceof Promise) {
+      throw new Error(
+        "checkSync() cannot be used with an asynchronous RateLimitStore (such as Upstash Redis). Await check(...) instead."
+      );
+    }
+
+    const { count, resetAt } = incrementResult;
+    const resetSeconds = Math.max(1, Math.ceil((resetAt - now) / 1000));
+
+    if (count > limit) {
+      return {
+        success: false,
+        limit,
+        remaining: 0,
+        reset: resetSeconds,
+      };
+    }
+
+    return {
+      success: true,
+      limit,
+      remaining: Math.max(0, limit - count),
+      reset: resetSeconds,
+    };
+  }
+
+  /**
+   * Async check alias for distributed stores.
+   */
+  public async checkAsync(identifier: string, isAuthenticated = false): Promise<RateLimitResult> {
+    return this.check(identifier, isAuthenticated);
+  }
+
+  /**
+   * Inspect active backing store configuration.
+   */
+  public getStoreType(): "distributed-upstash-redis" | "process-shared-memory" | "in-memory" {
+    if (this.store instanceof UpstashRedisRateLimitStore) {
+      return "distributed-upstash-redis";
+    }
+    if (this.store instanceof SharedRateLimitStore) {
+      return "process-shared-memory";
+    }
+    return "in-memory";
+  }
+
+  public isTrulyDistributed(): boolean {
+    return this.store instanceof UpstashRedisRateLimitStore;
   }
 
   /**
@@ -269,21 +383,28 @@ export function getClientIp(request: Request): string {
   return "anonymous-client";
 }
 
+export interface VerifiedIdentity {
+  userId?: string | null;
+  verifiedOrgId?: string | null;
+}
+
 /**
  * Resolve client identity for rate limiting:
- * If an authenticated organization or user is available, use their ID (with higher quota).
- * Otherwise, fall back to the sanitized client IP.
+ * CRITICAL SECURITY FIX: Never grant an authenticated tier based on client-supplied headers or query params
+ * (such as x-organization-id or ?organization_id=).
+ * Only when a verified identity (from a validated session and confirmed organization membership)
+ * is passed will the authenticated quota be granted.
+ * Unauthenticated callers are strictly assigned an IP-based identity.
  */
 export function resolveClientIdentity(
   request: Request,
-  orgId?: string | null,
-  userId?: string | null
+  verifiedAuth?: VerifiedIdentity | null
 ): { identity: string; isAuthenticated: boolean } {
-  if (orgId) {
-    return { identity: `org:${orgId}`, isAuthenticated: true };
+  if (verifiedAuth?.verifiedOrgId) {
+    return { identity: `org:${verifiedAuth.verifiedOrgId}`, isAuthenticated: true };
   }
-  if (userId) {
-    return { identity: `user:${userId}`, isAuthenticated: true };
+  if (verifiedAuth?.userId) {
+    return { identity: `user:${verifiedAuth.userId}`, isAuthenticated: true };
   }
   return { identity: `ip:${getClientIp(request)}`, isAuthenticated: false };
 }

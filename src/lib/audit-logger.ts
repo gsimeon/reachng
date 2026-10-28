@@ -146,10 +146,14 @@ export async function getServerAuditSink(): Promise<DurableAuditSink | null> {
 
 /**
  * Record a structured audit event.
- * If a durable sink (Supabase client) is provided, also attempts to persist to public.audit_events.
+ * If a durable sink (Supabase client) is provided, awaits persistence to public.audit_events
+ * to guarantee that serverless invocations do not terminate prior to write completion.
  * Updates durable audit telemetry to make persistence and failures observable.
  */
-export function recordAuditEvent(event: AuditEventPayload, durableSink?: DurableAuditSink | null): StructuredAuditLog {
+export async function recordAuditEvent(
+  event: AuditEventPayload,
+  durableSink?: DurableAuditSink | null
+): Promise<StructuredAuditLog> {
   const log: StructuredAuditLog = {
     timestamp: new Date().toISOString(),
     level:
@@ -191,11 +195,90 @@ export function recordAuditEvent(event: AuditEventPayload, durableSink?: Durable
     }
   }
 
-  // Durable sink write to PostgreSQL audit_events (non-blocking async)
+  // Durable sink write to PostgreSQL audit_events (reliably awaited for serverless execution)
   if (durableSink) {
     durableTelemetry.configured = true;
     durableTelemetry.totalWritesAttempted += 1;
 
+    try {
+      const res = await Promise.resolve(
+        durableSink.from("audit_events").insert({
+          organization_id: log.organizationId,
+          actor_id: log.actorId,
+          action: log.eventType,
+          resource_type: log.eventType.split(".")[0] || "system",
+          metadata: {
+            requestId: log.requestId,
+            clientIp: log.clientIp,
+            statusCode: log.statusCode,
+            durationMs: log.durationMs,
+            ...log.metadata,
+          },
+        })
+      );
+
+      const potentialError = (res as { error?: unknown })?.error;
+      if (potentialError) {
+        durableTelemetry.lastError =
+          typeof potentialError === "object" && potentialError !== null && "message" in potentialError
+            ? String((potentialError as { message: unknown }).message)
+            : String(potentialError);
+        if (process.env.NODE_ENV !== "test") {
+          console.warn("[audit-logger] Warning: durable sink write returned error:", potentialError);
+        }
+      } else {
+        durableTelemetry.verified = true;
+        durableTelemetry.totalWritesSucceeded += 1;
+        durableTelemetry.lastWriteAt = new Date().toISOString();
+        durableTelemetry.lastError = undefined;
+      }
+    } catch (err) {
+      durableTelemetry.lastError = err instanceof Error ? err.message : String(err);
+      if (process.env.NODE_ENV !== "test") {
+        console.warn("[audit-logger] Warning: durable sink write failed:", err instanceof Error ? err.message : err);
+      }
+    }
+  }
+
+  return log;
+}
+
+/**
+ * Synchronous variant for fire-and-forget logging when persistence is not awaited.
+ */
+export function recordAuditEventSync(
+  event: AuditEventPayload,
+  durableSink?: DurableAuditSink | null
+): StructuredAuditLog {
+  const log: StructuredAuditLog = {
+    timestamp: new Date().toISOString(),
+    level:
+      event.level ??
+      (event.statusCode && event.statusCode >= 500
+        ? "error"
+        : event.statusCode && event.statusCode >= 400
+        ? "warn"
+        : "info"),
+    eventType: event.eventType,
+    requestId:
+      event.requestId ||
+      (typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `req_${Date.now()}`),
+    clientIp: maskIp(event.clientIp),
+    statusCode: event.statusCode ?? 200,
+    durationMs: event.durationMs !== undefined ? Math.round(event.durationMs) : undefined,
+    organizationId: event.organizationId ?? null,
+    actorId: event.actorId ?? null,
+    metadata: sanitizeMetadata(event.metadata),
+  };
+
+  auditLogBuffer.unshift(log);
+  if (auditLogBuffer.length > MAX_LOG_BUFFER) auditLogBuffer.pop();
+
+  if (durableSink) {
+    durableTelemetry.configured = true;
+    durableTelemetry.totalWritesAttempted += 1;
     Promise.resolve(
       durableSink.from("audit_events").insert({
         organization_id: log.organizationId,
@@ -213,27 +296,13 @@ export function recordAuditEvent(event: AuditEventPayload, durableSink?: Durable
     )
       .then((res) => {
         const potentialError = (res as { error?: unknown })?.error;
-        if (potentialError) {
-          durableTelemetry.lastError =
-            typeof potentialError === "object" && potentialError !== null && "message" in potentialError
-              ? String((potentialError as { message: unknown }).message)
-              : String(potentialError);
-          if (process.env.NODE_ENV !== "test") {
-            console.warn("[audit-logger] Warning: durable sink write returned error:", potentialError);
-          }
-        } else {
+        if (!potentialError) {
           durableTelemetry.verified = true;
           durableTelemetry.totalWritesSucceeded += 1;
           durableTelemetry.lastWriteAt = new Date().toISOString();
-          durableTelemetry.lastError = undefined;
         }
       })
-      .catch((err) => {
-        durableTelemetry.lastError = err instanceof Error ? err.message : String(err);
-        if (process.env.NODE_ENV !== "test") {
-          console.warn("[audit-logger] Warning: durable sink write failed:", err instanceof Error ? err.message : err);
-        }
-      });
+      .catch(() => {});
   }
 
   return log;

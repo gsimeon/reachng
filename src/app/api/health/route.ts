@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getRecentAuditLogs, getDurableAuditTelemetry } from "@/lib/audit-logger";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { postcodeRateLimiter } from "@/lib/rate-limit";
 
 export async function GET() {
   const hasSupabaseUrl = Boolean(
@@ -11,6 +12,10 @@ export async function GET() {
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY &&
     !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY.includes("YOUR_SUPABASE_ANON_KEY")
   );
+  const hasServiceRoleKey = Boolean(
+    process.env.SUPABASE_SERVICE_ROLE_KEY &&
+    !process.env.SUPABASE_SERVICE_ROLE_KEY.includes("YOUR_SERVICE_KEY")
+  );
   const hasNdapsKey = Boolean(process.env.NDAPS_API_KEY && process.env.NDAPS_API_KEY.trim() !== "");
   const hasNdapsBase = Boolean(process.env.NDAPS_API_BASE_URL && process.env.NDAPS_API_BASE_URL.trim() !== "");
   const hasNdapsPath = Boolean(process.env.NDAPS_LOOKUP_PATH && process.env.NDAPS_LOOKUP_PATH.trim() !== "");
@@ -18,7 +23,7 @@ export async function GET() {
   const ndapsConfigured = hasNdapsKey && hasNdapsBase && hasNdapsPath;
   const supabaseConfigured = hasSupabaseUrl && hasSupabaseKey;
 
-  // Actual live connectivity probe for Supabase (distinguish configured from reachable)
+  // Live connectivity probe for Supabase (distinguish configured from reachable)
   let dbReachable = false;
   let dbLatencyMs: number | undefined;
   let dbError: string | undefined;
@@ -49,6 +54,18 @@ export async function GET() {
 
   const isDegraded = supabaseConfigured && !dbReachable;
 
+  // Rate limiter actual backing store capabilities
+  const rateLimitStoreType = postcodeRateLimiter.getStoreType();
+  const rateLimitIsDistributed = postcodeRateLimiter.isTrulyDistributed();
+
+  // Audit logger sink resolution
+  let configuredAuditSink = "stdout-json";
+  if (hasServiceRoleKey) {
+    configuredAuditSink = "service-role-durable";
+  } else if (supabaseConfigured) {
+    configuredAuditSink = "session-client-supabase";
+  }
+
   return NextResponse.json({
     status: isDegraded ? "degraded" : "healthy",
     uptimeSeconds: uptime,
@@ -63,7 +80,7 @@ export async function GET() {
         error: dbError ? "DATABASE_UNAVAILABLE" : undefined,
         provider: supabaseConfigured ? "supabase-cloud" : "local-browser-fallback",
         rlsPolicyConfigured: supabaseConfigured,
-        rlsEnforcementVerified: false, // Requires live tenant probe execution
+        rlsEnforcementVerified: false, // Authoritative verification requires live tenant isolation probe execution
       },
       ndapsProvider: {
         configured: ndapsConfigured,
@@ -76,7 +93,8 @@ export async function GET() {
       },
       rateLimiter: {
         status: "operational",
-        type: process.env.RATE_LIMIT_STORE_TYPE || "sliding-window-tiered",
+        storeType: rateLimitStoreType,
+        isTrulyDistributed: rateLimitIsDistributed,
         trustedProxyProvider: (process.env.TRUSTED_PROXY_PROVIDER || "direct (unconfigured)").toLowerCase(),
         trackedLimits: {
           postcodeLookup: "60 req/min (300 authenticated)",
@@ -86,8 +104,8 @@ export async function GET() {
       },
       auditLogger: {
         status: "operational",
-        configuredSink: supabaseConfigured ? "dual (stdout + postgresql)" : "stdout-json",
-        durableWritesConfigured: supabaseConfigured,
+        configuredSink: configuredAuditSink,
+        durableWritesConfigured: hasServiceRoleKey || supabaseConfigured,
         durableWritesVerified: durableTelemetry.verified,
         totalWritesAttempted: durableTelemetry.totalWritesAttempted,
         totalWritesSucceeded: durableTelemetry.totalWritesSucceeded,

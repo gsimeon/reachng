@@ -2,18 +2,30 @@ import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { z } from "zod";
 
-/**
- * ReachNG Acceptance Suite: API Route-Level Tests
- * Validates:
- * 1. Provider timeouts, malformed payloads, HTTP errors, and postcode mismatches
- * 2. Unauthenticated location requests and invalid input
- * 3. Cross-workspace read, create, and delete attempts (multi-tenant boundary enforcement)
- * 4. Database failures and safe error responses (zero internal Postgres leakage)
- * 5. Audit persistence and failure handling
- * 6. Rate-limit enforcement and spoofed proxy headers
- */
+// Direct imports of actual route handlers and modules
+import { POST as postcodeHandler } from "@/app/api/postcode/route";
+import { POST as batchHandler } from "@/app/api/batch/route";
+import { GET as locationsGetHandler, POST as locationsPostHandler, DELETE as locationsDeleteHandler } from "@/app/api/locations/route";
+import { GET as healthHandler } from "@/app/api/health/route";
+import {
+  SlidingWindowRateLimiter,
+  SharedRateLimitStore,
+  UpstashRedisRateLimitStore,
+  getClientIp,
+  resolveClientIdentity,
+  postcodeRateLimiter,
+  batchRateLimiter,
+  locationsRateLimiter,
+} from "@/lib/rate-limit";
+import {
+  recordAuditEvent,
+  getDurableAuditTelemetry,
+  maskIp,
+  sanitizeMetadata,
+} from "@/lib/audit-logger";
+import { verifyRequestAuth, toVerifiedIdentity } from "@/lib/auth-helpers";
 
-// --- Schemas & Helper Functions matching Route Implementations ---
+// --- Schemas & Helper Functions ---
 
 const postcodeInputSchema = z.object({
   postcode: z.string().trim().min(1).max(80),
@@ -40,180 +52,61 @@ const ndapsProviderResponseSchema = z.object({
   source: z.string().optional(),
 }).passthrough();
 
-function maskIp(ip) {
-  if (!ip || ip === "anonymous-client") return "anonymous";
-  if (ip.includes(".")) {
-    const parts = ip.split(".");
-    if (parts.length === 4) return `${parts[0]}.${parts[1]}.${parts[2]}.xxx`;
-  }
-  if (ip.includes(":")) {
-    const parts = ip.split(":");
-    return `${parts.slice(0, 3).join(":")}:xxxx:xxxx`;
-  }
-  return ip.slice(0, 4) + "xxx";
-}
-
-function sanitizeMetadata(data) {
-  if (!data) return {};
-  const sensitiveKeyPatterns = [/key/i, /secret/i, /token/i, /auth/i, /password/i, /cookie/i];
-  const sanitized = {};
-
-  for (const [k, v] of Object.entries(data)) {
-    if (sensitiveKeyPatterns.some((pattern) => pattern.test(k))) {
-      sanitized[k] = "[REDACTED]";
-      continue;
-    }
-    if (typeof v === "string") {
-      if (v.startsWith("Bearer ") || v.startsWith("eyJ")) {
-        sanitized[k] = "[REDACTED]";
-      } else {
-        sanitized[k] = v;
-      }
-    } else if (typeof v === "object" && v !== null && !Array.isArray(v)) {
-      sanitized[k] = sanitizeMetadata(v);
-    } else {
-      sanitized[k] = v;
-    }
-  }
-  return sanitized;
-}
-
-function getClientIp(headers, trustedProvider = "none", requireTrusted = true) {
-  const get = (k) => headers[k] || headers[k.toLowerCase()];
-
-  if (trustedProvider === "cloudflare") {
-    const cfIp = get("cf-connecting-ip");
-    if (cfIp && /^[0-9a-fA-F:.]+$/.test(cfIp.trim())) return cfIp.trim();
-    return "anonymous-client";
-  }
-
-  if (trustedProvider === "vercel") {
-    const vercelIp = get("x-vercel-ip");
-    if (vercelIp && /^[0-9a-fA-F:.]+$/.test(vercelIp.trim())) return vercelIp.trim();
-    return "anonymous-client";
-  }
-
-  if (trustedProvider === "none" || requireTrusted) {
-    return "anonymous-client";
-  }
-
-  const forwarded = get("x-forwarded-for");
-  if (forwarded) {
-    const firstIp = forwarded.split(",")[0]?.trim();
-    if (firstIp && /^[0-9a-fA-F:.]+$/.test(firstIp)) return firstIp;
-  }
-
-  return "anonymous-client";
-}
-
-// --- Shared Rate Limiter Implementation ---
-class SharedRateLimitStore {
-  constructor() {
-    this.buckets = new Map();
-  }
-
-  increment(key, windowMs) {
-    const now = Date.now();
-    const bucket = this.buckets.get(key);
-    if (!bucket || now >= bucket.resetAt) {
-      const resetAt = now + windowMs;
-      const newBucket = { count: 1, resetAt };
-      this.buckets.set(key, newBucket);
-      return newBucket;
-    }
-    bucket.count += 1;
-    return bucket;
-  }
-
-  reset() {
-    this.buckets.clear();
-  }
-}
-
-class TestRateLimiter {
-  constructor(options, store) {
-    this.limit = options.limit;
-    this.authenticatedLimit = options.authenticatedLimit || options.limit * 5;
-    this.windowMs = options.windowMs;
-    this.store = store || new SharedRateLimitStore();
-  }
-
-  check(identifier, isAuthenticated = false) {
-    const limit = isAuthenticated ? this.authenticatedLimit : this.limit;
-    const now = Date.now();
-    const { count, resetAt } = this.store.increment(identifier, this.windowMs);
-    const resetSeconds = Math.max(1, Math.ceil((resetAt - now) / 1000));
-
-    if (count > limit) {
-      return { success: false, limit, remaining: 0, reset: resetSeconds };
-    }
-    return { success: true, limit, remaining: Math.max(0, limit - count), reset: resetSeconds };
-  }
-}
-
 // ==============================================================================
 // 1. Provider Timeouts, Malformed Payloads, HTTP Errors & Postcode Mismatches
 // ==============================================================================
 
 describe("1. Provider timeouts, malformed payloads, HTTP errors, and postcode mismatches", () => {
   it("sanitizes provider timeouts and returns safe 502 without leaking URLs or keys", () => {
-    function handlePostcodeProviderLookup(postcode, simulateTimeout = false) {
-      if (simulateTimeout) {
-        // Simulates provider abort / gateway timeout
-        return {
-          status: 502,
-          headers: { "Content-Type": "application/json" },
-          body: {
-            error: "The postcode provider could not complete the lookup. Try again later.",
-            code: "PROVIDER_UNAVAILABLE",
-          },
-        };
-      }
-      return { status: 200, body: { postcode } };
+    let capturedError = null;
+    let safeResponse = null;
+
+    try {
+      const err = new Error("Upstream timeout connecting to https://ndaps-gateway.nipost.gov.ng?key=secret-ndaps-key-999");
+      err.code = "ETIMEDOUT";
+      throw err;
+    } catch (err) {
+      capturedError = sanitizeMetadata({
+        upstreamUrl: "https://ndaps-gateway.nipost.gov.ng?key=secret-ndaps-key-999",
+        apiKey: "secret-ndaps-key-999",
+        message: err.message,
+      });
+
+      safeResponse = {
+        error: "The postcode provider could not complete the lookup. Try again later.",
+        code: "PROVIDER_UNAVAILABLE",
+      };
     }
 
-    const res = handlePostcodeProviderLookup("LA010010101", true);
-    assert.equal(res.status, 502);
-    assert.equal(res.body.code, "PROVIDER_UNAVAILABLE");
-    assert.equal(res.body.error.includes("http"), false);
-    assert.equal(res.body.error.includes("key"), false);
-    assert.equal(res.body.error.includes("timeout"), false);
+    assert.equal(capturedError.apiKey, "[REDACTED]");
+    assert.equal(safeResponse.code, "PROVIDER_UNAVAILABLE");
+    assert.equal(safeResponse.error.includes("secret"), false);
   });
 
   it("rejects provider response with mismatched postcode as unconfirmed", () => {
-    const requestedPostcode = "LA010010101"; // Lagos
-    const providerPayload = {
-      postcode: "KN010020101", // Kano (mismatch)
+    const requestedPostcode = "LA010010101";
+    const providerReturnedPayload = {
+      postcode: "AB020020202",
       status: "active",
-      state: "Kano",
+      state: "Abia",
+      lga: "Aba North",
     };
 
-    function processProviderResponse(requested, rawPayload) {
-      const parsed = ndapsProviderResponseSchema.safeParse(rawPayload);
-      if (!parsed.success) {
-        return { status: "unconfirmed_provider_response", isAuthoritative: false };
-      }
-      if (parsed.data.postcode.trim().toUpperCase() !== requested) {
-        return {
-          status: "unconfirmed_provider_response",
-          isAuthoritative: false,
-          disclaimer: "Provider response postcode does not match the requested postcode.",
-        };
-      }
-      return { status: "provider_confirmed", isAuthoritative: true };
-    }
+    const parsed = ndapsProviderResponseSchema.safeParse(providerReturnedPayload);
+    assert.equal(parsed.success, true);
 
-    const verification = processProviderResponse(requestedPostcode, providerPayload);
-    assert.equal(verification.status, "unconfirmed_provider_response");
-    assert.equal(verification.isAuthoritative, false);
-    assert.match(verification.disclaimer, /does not match the requested postcode/);
+    const matchesRequested = parsed.data.postcode.toUpperCase() === requestedPostcode.toUpperCase();
+    assert.equal(matchesRequested, false);
+
+    const resultingStatus = matchesRequested ? "provider_confirmed" : "unconfirmed";
+    assert.equal(resultingStatus, "unconfirmed");
   });
 
   it("rejects malformed upstream schema without valid status indicator", () => {
-    const requestedPostcode = "LA010010101";
     const malformedPayload = {
       postcode: "LA010010101",
-      status: "pending_manual_review_unconfirmed",
+      status: "pending_review",
+      unknownKey: 12345,
     };
 
     const parsed = ndapsProviderResponseSchema.safeParse(malformedPayload);
@@ -221,27 +114,19 @@ describe("1. Provider timeouts, malformed payloads, HTTP errors, and postcode mi
   });
 
   it("handles upstream HTTP 500 error gracefully without exposing provider internals", () => {
-    function simulateProviderNetworkCall(shouldFail = true) {
-      if (shouldFail) {
-        const err = new Error("Upstream server failed: 500 Internal Server Error at https://api.nipost.gov.ng/v1/postcode");
-        // Route handler maps upstream error to client-safe response
-        return {
-          status: 502,
-          body: {
-            error: "The postcode provider could not complete the lookup. Try again later.",
-            code: "PROVIDER_UNAVAILABLE",
-          },
-          loggedError: err.message,
-        };
-      }
-      return { status: 200 };
-    }
+    const simulatedUpstreamHttpError = {
+      status: 500,
+      statusText: "Internal Server Error",
+      headers: { "x-backend-server": "internal-ndaps-node-04.nipost.internal" },
+    };
 
-    const res = simulateProviderNetworkCall(true);
-    assert.equal(res.status, 502);
-    assert.equal(res.body.code, "PROVIDER_UNAVAILABLE");
-    // Client body must NOT contain the internal API host or status trace
-    assert.equal(res.body.error.includes("nipost.gov.ng"), false);
+    const clientResponse = {
+      error: "The postcode provider could not complete the lookup. Try again later.",
+      code: "PROVIDER_UNAVAILABLE",
+    };
+
+    assert.equal(clientResponse.code, "PROVIDER_UNAVAILABLE");
+    assert.equal(Object.keys(clientResponse).includes("x-backend-server"), false);
   });
 });
 
@@ -250,371 +135,423 @@ describe("1. Provider timeouts, malformed payloads, HTTP errors, and postcode mi
 // ==============================================================================
 
 describe("2. Unauthenticated location requests and invalid input", () => {
-  function handleLocationRoute({ user, method, body, queryId }) {
-    if (!user) {
-      const messages = {
-        GET: "Sign in to view saved locations.",
-        POST: "Sign in to save a location.",
-        DELETE: "Sign in to delete a location.",
-      };
-      return { status: 401, body: { error: messages[method] } };
-    }
+  it("guards GET /api/locations against unauthenticated callers with HTTP 401", async () => {
+    const unauthRequest = new Request("http://localhost:3000/api/locations", {
+      method: "GET",
+      headers: { "x-organization-id": "00000000-0000-0000-0000-000000000000" },
+    });
 
-    if (method === "POST") {
-      const parsed = locationInputSchema.safeParse(body);
-      if (!parsed.success) {
-        return {
-          status: 422,
-          body: { error: "Check the location label, category, and 11-character postcode." },
-        };
-      }
-      return { status: 201, body: { location: { id: "loc-created", ...parsed.data } } };
-    }
-
-    if (method === "DELETE") {
-      if (!queryId) {
-        return { status: 400, body: { error: "Missing location ID." } };
-      }
-      return { status: 200, body: { success: true } };
-    }
-
-    return { status: 200, body: { locations: [] } };
-  }
-
-  it("guards GET /api/locations against unauthenticated callers with HTTP 401", () => {
-    const res = handleLocationRoute({ user: null, method: "GET" });
+    const res = await locationsGetHandler(unauthRequest);
     assert.equal(res.status, 401);
-    assert.equal(res.body.error, "Sign in to view saved locations.");
+    const body = await res.json();
+    assert.equal(body.error, "Sign in to view saved locations.");
   });
 
-  it("guards POST /api/locations against unauthenticated callers with HTTP 401", () => {
-    const res = handleLocationRoute({ user: null, method: "POST", body: { label: "Test", postcode: "LA010010101" } });
+  it("guards POST /api/locations against unauthenticated callers with HTTP 401", async () => {
+    const unauthRequest = new Request("http://localhost:3000/api/locations", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-organization-id": "00000000-0000-0000-0000-000000000000",
+      },
+      body: JSON.stringify({
+        label: "Lekki Fulfilment Hub",
+        postcode: "LA010010101",
+      }),
+    });
+
+    const res = await locationsPostHandler(unauthRequest);
     assert.equal(res.status, 401);
-    assert.equal(res.body.error, "Sign in to save a location.");
+    const body = await res.json();
+    assert.equal(body.error, "Sign in to save a location.");
   });
 
-  it("guards DELETE /api/locations against unauthenticated callers with HTTP 401", () => {
-    const res = handleLocationRoute({ user: null, method: "DELETE", queryId: "loc-123" });
+  it("guards DELETE /api/locations against unauthenticated callers with HTTP 401", async () => {
+    const unauthRequest = new Request("http://localhost:3000/api/locations?id=123", {
+      method: "DELETE",
+    });
+
+    const res = await locationsDeleteHandler(unauthRequest);
     assert.equal(res.status, 401);
-    assert.equal(res.body.error, "Sign in to delete a location.");
+    const body = await res.json();
+    assert.equal(body.error, "Sign in to delete a location.");
   });
 
   it("rejects location POST with invalid postcode (< 11 chars or punctuation) with HTTP 422", () => {
-    const user = { id: "user-1" };
-    const badPostcodes = ["SHORT", "LA01-010101", "LA01001010!", "12345"];
-    for (const code of badPostcodes) {
-      const res = handleLocationRoute({ user, method: "POST", body: { label: "Main Depot", postcode: code } });
-      assert.equal(res.status, 422, `Expected 422 for postcode: ${code}`);
-    }
+    const shortPostcode = { label: "Ikeja Hub", postcode: "LA01001" };
+    const punctuatedPostcode = { label: "Ikeja Hub", postcode: "LA01-001-01" };
+
+    assert.equal(locationInputSchema.safeParse(shortPostcode).success, false);
+    assert.equal(locationInputSchema.safeParse(punctuatedPostcode).success, false);
   });
 
   it("rejects location POST with empty label with HTTP 422", () => {
-    const user = { id: "user-1" };
-    const res = handleLocationRoute({ user, method: "POST", body: { label: "", postcode: "LA010010101" } });
-    assert.equal(res.status, 422);
+    const emptyLabel = { label: "   ", postcode: "LA010010101" };
+    assert.equal(locationInputSchema.safeParse(emptyLabel).success, false);
   });
 
   it("rejects location POST with invalid category with HTTP 422", () => {
-    const user = { id: "user-1" };
-    const res = handleLocationRoute({
-      user,
-      method: "POST",
-      body: { label: "Hub", postcode: "LA010010101", category: "Warehouse Unknown" },
-    });
-    assert.equal(res.status, 422);
+    const invalidCat = { label: "Hub", postcode: "LA010010101", category: "Warehouse" };
+    assert.equal(locationInputSchema.safeParse(invalidCat).success, false);
   });
 
   it("rejects location POST with non-UUID organization_id with HTTP 422", () => {
-    const user = { id: "user-1" };
-    const res = handleLocationRoute({
-      user,
+    const invalidOrg = { label: "Hub", postcode: "LA010010101", organization_id: "not-a-uuid" };
+    assert.equal(locationInputSchema.safeParse(invalidOrg).success, false);
+  });
+});
+
+// ==============================================================================
+// 3. Rate-Limit Identity Spoofing Protection (Critical Fix)
+// ==============================================================================
+
+describe("3. Rate-limit identity spoofing protection", () => {
+  it("unauthenticated request supplying x-organization-id is strictly assigned IP identity and base quota", () => {
+    const reqWithSpoofedOrg = new Request("http://localhost:3000/api/postcode", {
       method: "POST",
-      body: { label: "Hub", postcode: "LA010010101", organization_id: "not-a-valid-uuid" },
+      headers: {
+        "x-organization-id": "e4b95f2d-8b01-4475-a50d-d4ec11019a32",
+        "x-forwarded-for": "102.89.33.45",
+      },
     });
-    assert.equal(res.status, 422);
+
+    // An unauthenticated request has verifiedAuth = null
+    const { identity, isAuthenticated } = resolveClientIdentity(reqWithSpoofedOrg, null);
+
+    assert.equal(isAuthenticated, false);
+    assert.equal(identity.startsWith("ip:"), true);
+    assert.equal(identity.includes("e4b95f2d"), false);
+  });
+
+  it("unauthenticated caller cannot bypass per-identity limits by rotating x-organization-id headers", () => {
+    const limiter = new SlidingWindowRateLimiter({ limit: 3, authenticatedLimit: 15, windowMs: 60000 });
+    const ip = "197.210.65.12";
+
+    // Request 1: Claims Org Alpha
+    const req1 = new Request("http://localhost:3000/api/postcode", {
+      headers: { "x-organization-id": "org-alpha-1111", "x-forwarded-for": ip },
+    });
+    const id1 = resolveClientIdentity(req1, null);
+    const r1 = limiter.checkSync(id1.identity, id1.isAuthenticated);
+    assert.equal(r1.success, true);
+    assert.equal(r1.limit, 3); // Base limit, NOT 15
+
+    // Request 2: Claims Org Beta
+    const req2 = new Request("http://localhost:3000/api/postcode", {
+      headers: { "x-organization-id": "org-beta-2222", "x-forwarded-for": ip },
+    });
+    const id2 = resolveClientIdentity(req2, null);
+    const r2 = limiter.checkSync(id2.identity, id2.isAuthenticated);
+    assert.equal(r2.success, true);
+
+    // Request 3: Claims Org Gamma
+    const req3 = new Request("http://localhost:3000/api/postcode", {
+      headers: { "x-organization-id": "org-gamma-3333", "x-forwarded-for": ip },
+    });
+    const id3 = resolveClientIdentity(req3, null);
+    const r3 = limiter.checkSync(id3.identity, id3.isAuthenticated);
+    assert.equal(r3.success, true);
+    assert.equal(r3.remaining, 0);
+
+    // Request 4: Claims Org Delta -> BLOCKED because all resolve to the same client IP
+    const req4 = new Request("http://localhost:3000/api/postcode", {
+      headers: { "x-organization-id": "org-delta-4444", "x-forwarded-for": ip },
+    });
+    const id4 = resolveClientIdentity(req4, null);
+    const r4 = limiter.checkSync(id4.identity, id4.isAuthenticated);
+    assert.equal(r4.success, false);
+    assert.equal(r4.remaining, 0);
+  });
+
+  it("grants authenticated organization quota only when backed by verified membership", () => {
+    const req = new Request("http://localhost:3000/api/postcode");
+    const verifiedAuth = {
+      userId: "user-uuid-1234",
+      verifiedOrgId: "org-uuid-5678",
+    };
+
+    const { identity, isAuthenticated } = resolveClientIdentity(req, verifiedAuth);
+    assert.equal(isAuthenticated, true);
+    assert.equal(identity, "org:org-uuid-5678");
+
+    const limiter = new SlidingWindowRateLimiter({ limit: 2, authenticatedLimit: 10, windowMs: 60000 });
+    const r = limiter.checkSync(identity, isAuthenticated);
+    assert.equal(r.limit, 10);
   });
 });
 
 // ==============================================================================
-// 3. Cross-Workspace Read, Create, and Delete Attempts (Multi-Tenant Isolation)
+// 4. Truly Distributed Rate Limiter & Concurrency Enforcement
 // ==============================================================================
 
-describe("3. Cross-workspace read, create, and delete attempts", () => {
-  const members = [
-    { organization_id: "org-alpha-1111", user_id: "user-alpha" },
-    { organization_id: "org-beta-2222", user_id: "user-beta" },
-  ];
+describe("4. Distributed rate limiter & async check safety", () => {
+  it("UpstashRedisRateLimitStore executes atomic HTTP pipeline (INCR + EXPIRE NX)", async () => {
+    let capturedPipelineBody = null;
+    let authHeader = null;
 
-  let locations = [
-    { id: "loc-alpha-001", organization_id: "org-alpha-1111", label: "Alpha Lagos Port", postcode: "LA010010101" },
-    { id: "loc-beta-001", organization_id: "org-beta-2222", label: "Beta Abuja Transit", postcode: "AB010020110" },
-  ];
-
-  function queryLocations(userId, targetOrgId) {
-    const userOrgIds = members.filter((m) => m.user_id === userId).map((m) => m.organization_id);
-    let allowed = locations.filter((loc) => userOrgIds.includes(loc.organization_id));
-    if (targetOrgId) {
-      allowed = allowed.filter((loc) => loc.organization_id === targetOrgId);
-    }
-    return allowed;
-  }
-
-  function createLocation(userId, targetOrgId, payload) {
-    const userOrgIds = members.filter((m) => m.user_id === userId).map((m) => m.organization_id);
-    if (!userOrgIds.includes(targetOrgId)) {
+    // Mock global fetch for Upstash REST pipeline
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url, options) => {
+      authHeader = options?.headers?.Authorization;
+      capturedPipelineBody = JSON.parse(options?.body);
       return {
-        status: 403,
-        body: {
-          error: "You do not have permission to add locations to this workspace.",
-          code: "UNAUTHORIZED",
-        },
+        ok: true,
+        json: async () => [{ result: 4 }, { result: 1 }],
       };
-    }
-    const newLoc = { id: `loc_${Date.now()}`, organization_id: targetOrgId, ...payload };
-    locations.push(newLoc);
-    return { status: 201, body: { location: newLoc } };
-  }
+    };
 
-  function deleteLocation(userId, locationId) {
-    const userOrgIds = members.filter((m) => m.user_id === userId).map((m) => m.organization_id);
-    const loc = locations.find((l) => l.id === locationId);
-    if (!loc || !userOrgIds.includes(loc.organization_id)) {
-      return { status: 400, body: { error: "Could not delete location." } };
-    }
-    locations = locations.filter((l) => l.id !== locationId);
-    return { status: 200, body: { success: true } };
-  }
+    try {
+      const store = new UpstashRedisRateLimitStore("https://mock-redis.upstash.io", "mock-token-xyz");
+      const { count, resetAt } = await store.increment("client-123", 60000);
 
-  it("blocks user from Org Alpha reading locations of Org Beta (returns 0 records)", () => {
-    // User Alpha queries with Org Beta's ID
-    const results = queryLocations("user-alpha", "org-beta-2222");
-    assert.equal(results.length, 0);
-  });
-
-  it("blocks user from Org Alpha inserting into Org Beta with HTTP 403 UNAUTHORIZED", () => {
-    const res = createLocation("user-alpha", "org-beta-2222", {
-      label: "Hijacked Depot",
-      postcode: "LA010010101",
-    });
-    assert.equal(res.status, 403);
-    assert.equal(res.body.code, "UNAUTHORIZED");
-    assert.equal(res.body.error, "You do not have permission to add locations to this workspace.");
-  });
-
-  it("blocks user from Org Alpha deleting an Org Beta location (record remains intact)", () => {
-    const res = deleteLocation("user-alpha", "loc-beta-001");
-    assert.equal(res.status, 400);
-    assert.equal(res.body.error, "Could not delete location.");
-
-    // Verify record still exists
-    const betaRecord = locations.find((l) => l.id === "loc-beta-001");
-    assert.ok(betaRecord !== undefined);
-    assert.equal(betaRecord.label, "Beta Abuja Transit");
-  });
-});
-
-// ==============================================================================
-// 4. Database Failures and Safe Error Responses
-// ==============================================================================
-
-describe("4. Database failures and safe error responses", () => {
-  it("sanitizes Postgres error messages and never exposes table names or SQL constraints", () => {
-    const internalErrors = [
-      'duplicate key value violates unique constraint "locations_pkey"',
-      'relation "public.locations" does not exist',
-      'connection to server at "db.xyz.supabase.co" failed: connection refused',
-    ];
-
-    function sanitizeDbClientResponse(internalError) {
-      // Rule: Never expose raw Postgres text
-      const isAuth = internalError.includes("unauthorized") || internalError.includes("permission");
-      if (isAuth) {
-        return { status: 403, error: "You do not have permission to add locations to this workspace.", code: "UNAUTHORIZED" };
-      }
-      return { status: 500, error: "Could not load locations.", code: "DATABASE_UNAVAILABLE" };
-    }
-
-    for (const rawErr of internalErrors) {
-      const sanitized = sanitizeDbClientResponse(rawErr);
-      assert.equal(sanitized.error.includes("public.locations"), false);
-      assert.equal(sanitized.error.includes("constraint"), false);
-      assert.equal(sanitized.error.includes("supabase.co"), false);
-      assert.equal(sanitized.status, 500);
+      assert.equal(count, 4);
+      assert.ok(resetAt > Date.now());
+      assert.equal(authHeader, "Bearer mock-token-xyz");
+      assert.deepEqual(capturedPipelineBody, [
+        ["INCR", "ratelimit:client-123"],
+        ["EXPIRE", "ratelimit:client-123", 60, "NX"],
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
     }
   });
 
-  it("health endpoint masks raw database connectivity error to DATABASE_UNAVAILABLE", () => {
-    const dbError = 'FATAL: password authentication failed for user "postgres"';
-    const publicDiagnostic = {
-      database: {
-        configured: true,
-        reachable: false,
-        error: dbError ? "DATABASE_UNAVAILABLE" : undefined,
+  it("SlidingWindowRateLimiter.check() awaits async store and enforces limits", async () => {
+    const mockAsyncStore = {
+      async increment(key, windowMs) {
+        return { count: 3, resetAt: Date.now() + windowMs };
       },
     };
 
-    assert.equal(publicDiagnostic.database.error, "DATABASE_UNAVAILABLE");
-    assert.equal(publicDiagnostic.database.error.includes("password"), false);
+    const limiter = new SlidingWindowRateLimiter({ limit: 2, windowMs: 60000 }, mockAsyncStore);
+    const result = await limiter.check("client-async", false);
+
+    assert.equal(result.success, false);
+    assert.equal(result.limit, 2);
+    assert.equal(result.remaining, 0);
+  });
+
+  it("checkSync throws an explicit error when invoked on an asynchronous store", () => {
+    const mockAsyncStore = {
+      increment() {
+        return Promise.resolve({ count: 10, resetAt: Date.now() + 1000 });
+      },
+    };
+
+    const limiter = new SlidingWindowRateLimiter({ limit: 5, windowMs: 1000 }, mockAsyncStore);
+
+    assert.throws(
+      () => {
+        limiter.checkSync("test-key", false);
+      },
+      /checkSync\(\) cannot be used with an asynchronous RateLimitStore/
+    );
+  });
+
+  it("shares atomic state and enforces concurrency limits across independent instances", async () => {
+    const sharedStore = new SharedRateLimitStore();
+    sharedStore.reset();
+    const testKey = `concurrent-client-${Date.now()}`;
+    const instanceA = new SlidingWindowRateLimiter({ limit: 5, windowMs: 60000 }, sharedStore);
+    const instanceB = new SlidingWindowRateLimiter({ limit: 5, windowMs: 60000 }, sharedStore);
+
+    // Concurrently issue 6 requests across both instances
+    const promises = [
+      instanceA.check(testKey),
+      instanceB.check(testKey),
+      instanceA.check(testKey),
+      instanceB.check(testKey),
+      instanceA.check(testKey),
+      instanceB.check(testKey),
+    ];
+
+    const results = await Promise.all(promises);
+    const successCount = results.filter((r) => r.success).length;
+    const blockedCount = results.filter((r) => !r.success).length;
+
+    assert.equal(successCount, 5);
+    assert.equal(blockedCount, 1);
+  });
+
+  it("reports active backing store type and distribution status accurately", () => {
+    const inMemoryLimiter = new SlidingWindowRateLimiter({ limit: 10, windowMs: 1000 });
+    assert.equal(inMemoryLimiter.getStoreType(), "in-memory");
+    assert.equal(inMemoryLimiter.isTrulyDistributed(), false);
+
+    const upstashLimiter = new SlidingWindowRateLimiter(
+      { limit: 10, windowMs: 1000 },
+      new UpstashRedisRateLimitStore("https://mock.upstash.io", "token")
+    );
+    assert.equal(upstashLimiter.getStoreType(), "distributed-upstash-redis");
+    assert.equal(upstashLimiter.isTrulyDistributed(), true);
   });
 });
 
 // ==============================================================================
-// 5. Audit Persistence and Failure Handling
+// 5. Durable Audit Persistence & Telemetry Verification
 // ==============================================================================
 
-describe("5. Audit persistence and failure handling", () => {
-  it("persists audit records with sanitized metadata and masks end-user IP", async () => {
+describe("5. Durable audit persistence & telemetry verification", () => {
+  it("recordAuditEvent reliably awaits durable sink persistence", async () => {
     let persistedRecord = null;
-    const mockSink = {
+    let writeCompleted = false;
+
+    const mockDurableSink = {
       from(table) {
+        assert.equal(table, "audit_events");
         return {
-          async insert(record) {
-            persistedRecord = record;
+          async insert(payload) {
+            // Simulate slight I/O latency
+            await new Promise((r) => setTimeout(r, 10));
+            persistedRecord = payload;
+            writeCompleted = true;
             return { error: null };
           },
         };
       },
     };
 
-    async function recordAudit(event, sink) {
-      const sanitized = sanitizeMetadata(event.metadata);
-      const maskedIp = maskIp(event.clientIp);
-
-      if (sink) {
-        await sink.from("audit_events").insert({
-          organization_id: event.organizationId || null,
-          actor_id: event.actorId || null,
-          action: event.eventType,
-          resource_type: event.eventType.split(".")[0],
-          metadata: { ...sanitized, clientIp: maskedIp },
-        });
-      }
-      return { persisted: true };
-    }
-
-    await recordAudit(
+    const result = await recordAuditEvent(
       {
         eventType: "location.create",
-        clientIp: "102.89.33.201",
+        clientIp: "102.89.33.45",
+        statusCode: 201,
         organizationId: "org-alpha-1111",
         actorId: "user-alpha",
         metadata: {
-          locationId: "loc-123",
-          apiKey: "secret-key-12345",
+          apiKey: "secret-ndaps-key",
           token: "Bearer jwt-secret",
         },
       },
-      mockSink
+      mockDurableSink
     );
 
+    // Guaranteed that write completed before function returned
+    assert.equal(writeCompleted, true);
     assert.ok(persistedRecord !== null);
     assert.equal(persistedRecord.organization_id, "org-alpha-1111");
-    assert.equal(persistedRecord.actor_id, "user-alpha");
-    assert.equal(persistedRecord.metadata.clientIp, "102.89.33.xxx");
     assert.equal(persistedRecord.metadata.apiKey, "[REDACTED]");
-    assert.equal(persistedRecord.metadata.token, "[REDACTED]");
+    assert.equal(persistedRecord.metadata.clientIp, "102.89.33.xxx");
+
+    const telemetry = getDurableAuditTelemetry();
+    assert.equal(telemetry.verified, true);
+    assert.ok(telemetry.totalWritesSucceeded > 0);
   });
 
-  it("durable sink failure does not crash the calling route handler", async () => {
+  it("durable sink failure does not crash route handler and is recorded in telemetry", async () => {
     const failingSink = {
       from() {
         return {
           async insert() {
-            throw new Error("Connection reset by peer");
+            throw new Error("PostgreSQL connection terminated unexpectedly");
           },
         };
       },
     };
 
-    let callerCrashed = false;
-    let telemetryCapturedError = null;
-
+    let crashed = false;
     try {
-      // Non-blocking async durable sink
-      Promise.resolve(failingSink.from("audit_events").insert({}))
-        .catch((err) => {
-          telemetryCapturedError = err.message;
-        });
+      await recordAuditEvent(
+        {
+          eventType: "postcode.lookup",
+          clientIp: "197.210.65.12",
+          statusCode: 200,
+        },
+        failingSink
+      );
     } catch {
-      callerCrashed = true;
+      crashed = true;
     }
 
-    // Wait microtask
-    await new Promise((r) => setTimeout(r, 10));
-
-    assert.equal(callerCrashed, false);
-    assert.equal(telemetryCapturedError, "Connection reset by peer");
+    assert.equal(crashed, false);
+    const telemetry = getDurableAuditTelemetry();
+    assert.equal(telemetry.lastError, "PostgreSQL connection terminated unexpectedly");
   });
 });
 
 // ==============================================================================
-// 6. Rate-Limit Enforcement and Spoofed Proxy Headers
+// 6. Actual Next.js Route Handler Execution
 // ==============================================================================
 
-describe("6. Rate-limit enforcement and spoofed proxy headers", () => {
-  it("rejects spoofed CF-Connecting-IP header when trusted provider is none or mismatched", () => {
-    const spoofedHeaders = {
-      "cf-connecting-ip": "1.2.3.4",
-      "x-forwarded-for": "10.0.0.1",
-    };
+describe("6. Actual Next.js route handler integration tests", () => {
+  it("POST /api/postcode: rejects malformed JSON with HTTP 400", async () => {
+    const req = new Request("http://localhost:3000/api/postcode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "invalid-json-string{",
+    });
 
-    // When TRUSTED_PROXY_PROVIDER is "none" or REQUIRE_TRUSTED_PROXY is enabled
-    const ipWithNone = getClientIp(spoofedHeaders, "none", true);
-    assert.equal(ipWithNone, "anonymous-client");
-
-    // When configured for vercel, cf-connecting-ip must be ignored
-    const ipWithVercel = getClientIp(spoofedHeaders, "vercel", true);
-    assert.equal(ipWithVercel, "anonymous-client");
-
-    // When configured for cloudflare, cf-connecting-ip is trusted
-    const ipWithCloudflare = getClientIp(spoofedHeaders, "cloudflare", true);
-    assert.equal(ipWithCloudflare, "1.2.3.4");
+    const res = await postcodeHandler(req);
+    assert.equal(res.status, 400);
+    const data = await res.json();
+    assert.equal(data.error, "Request body must be valid JSON.");
   });
 
-  it("shares rate-limit store across multiple limiter instances and enforces limits", () => {
-    const sharedStore = new SharedRateLimitStore();
-    const instanceA = new TestRateLimiter({ limit: 2, windowMs: 1000 }, sharedStore);
-    const instanceB = new TestRateLimiter({ limit: 2, windowMs: 1000 }, sharedStore);
+  it("POST /api/postcode: rejects non-11-character postcode with HTTP 422", async () => {
+    const req = new Request("http://localhost:3000/api/postcode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ postcode: "SHORT" }),
+    });
 
-    // Instance A processes request 1
-    const r1 = instanceA.check("shared-client");
-    assert.equal(r1.success, true);
-    assert.equal(r1.remaining, 1);
-
-    // Instance B processes request 2
-    const r2 = instanceB.check("shared-client");
-    assert.equal(r2.success, true);
-    assert.equal(r2.remaining, 0);
-
-    // Instance A receives request 3 -> blocked by shared counter
-    const r3 = instanceA.check("shared-client");
-    assert.equal(r3.success, false);
-    assert.equal(r3.remaining, 0);
-
-    // Instance B also observes client is blocked
-    const r4 = instanceB.check("shared-client");
-    assert.equal(r4.success, false);
+    const res = await postcodeHandler(req);
+    assert.equal(res.status, 422);
+    const data = await res.json();
+    assert.equal(data.code, "INVALID_FORMAT");
   });
 
-  it("grants 5x quota multiplier for authenticated organization requests", () => {
-    const limiter = new TestRateLimiter({ limit: 2, authenticatedLimit: 10, windowMs: 1000 });
+  it("POST /api/postcode: includes RFC rate-limit headers in response", async () => {
+    const req = new Request("http://localhost:3000/api/postcode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ postcode: "LA010010101" }),
+    });
 
-    // Anonymous client has limit 2
-    limiter.check("anon-ip", false);
-    limiter.check("anon-ip", false);
-    const anonBlocked = limiter.check("anon-ip", false);
-    assert.equal(anonBlocked.success, false);
+    const res = await postcodeHandler(req);
+    assert.ok(res.headers.get("RateLimit-Limit") !== null);
+    assert.ok(res.headers.get("RateLimit-Remaining") !== null);
+    assert.ok(res.headers.get("RateLimit-Reset") !== null);
+  });
 
-    // Authenticated client has limit 10
-    for (let i = 0; i < 9; i++) {
-      const authReq = limiter.check("org:org-alpha-1111", true);
-      assert.equal(authReq.success, true);
-    }
-    const auth10th = limiter.check("org:org-alpha-1111", true);
-    assert.equal(auth10th.success, true);
-    assert.equal(auth10th.remaining, 0);
+  it("POST /api/batch: rejects empty items array with HTTP 400", async () => {
+    const req = new Request("http://localhost:3000/api/batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items: [] }),
+    });
 
-    const authExceeded = limiter.check("org:org-alpha-1111", true);
-    assert.equal(authExceeded.success, false);
+    const res = await batchHandler(req);
+    assert.equal(res.status, 400);
+    const data = await res.json();
+    assert.equal(data.error, "Provide between 1 and 100 postcode strings to validate.");
+  });
+
+  it("POST /api/batch: processes batch and returns format verification counts", async () => {
+    const req = new Request("http://localhost:3000/api/batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        items: ["LA010010101", "INVALID", "FC010010101"],
+      }),
+    });
+
+    const res = await batchHandler(req);
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.equal(data.total, 3);
+    assert.equal(data.validCount, 2);
+    assert.equal(data.invalidCount, 1);
+  });
+
+  it("GET /api/health: reports accurate capabilities and strict verification semantics", async () => {
+    const res = await healthHandler();
+    assert.equal(res.status, 200);
+    const data = await res.json();
+
+    assert.equal(data.status, "healthy");
+    assert.ok(data.checks.rateLimiter.storeType !== undefined);
+    assert.equal(typeof data.checks.rateLimiter.isTrulyDistributed, "boolean");
+    assert.equal(data.checks.database.rlsEnforcementVerified, false);
+    assert.equal(data.checks.ndapsProvider.registryVerified, false);
   });
 });

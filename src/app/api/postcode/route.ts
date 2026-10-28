@@ -3,6 +3,7 @@ import { z } from "zod";
 import { looksLikeNdapsPostcode, lookupPostcode } from "@/lib/postcode";
 import { postcodeRateLimiter, getClientIp, resolveClientIdentity } from "@/lib/rate-limit";
 import { recordAuditEvent, getServerAuditSink } from "@/lib/audit-logger";
+import { verifyRequestAuth, toVerifiedIdentity } from "@/lib/auth-helpers";
 
 const bodySchema = z.object({ postcode: z.string().trim().min(1).max(80) });
 
@@ -11,23 +12,30 @@ export async function POST(request: Request) {
   const clientIp = getClientIp(request);
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
   const orgHeader = request.headers.get("x-organization-id");
-  const { identity, isAuthenticated } = resolveClientIdentity(request, orgHeader);
+
+  // 1. Authoritative identity resolution:
+  // Strictly verifies session and workspace membership before granting higher quota tier.
+  // Unauthenticated requests or spoofed organization headers are strictly assigned IP identity and base quota.
+  const auth = await verifyRequestAuth(request, orgHeader);
+  const verifiedIdentity = toVerifiedIdentity(auth);
+  const { identity, isAuthenticated } = resolveClientIdentity(request, verifiedIdentity);
   const auditSink = await getServerAuditSink();
 
-  // 1. Rate limiting enforcement (supports 5x tier for authenticated orgs)
-  const rateLimitResult = postcodeRateLimiter.check(identity, isAuthenticated);
+  // 2. Asynchronous rate limiting enforcement
+  const rateLimitResult = await postcodeRateLimiter.check(identity, isAuthenticated);
   const rateLimitHeaders = postcodeRateLimiter.getHeaders(rateLimitResult);
 
   if (!rateLimitResult.success) {
-    recordAuditEvent({
+    await recordAuditEvent({
       eventType: "rate_limit.exceeded",
       level: "warn",
       requestId,
       clientIp,
-      organizationId: orgHeader ?? null,
+      organizationId: auth.verifiedOrgId,
+      actorId: auth.user?.id ?? null,
       statusCode: 429,
       durationMs: performance.now() - start,
-      metadata: { route: "/api/postcode", limit: rateLimitResult.limit },
+      metadata: { route: "/api/postcode", limit: rateLimitResult.limit, identity },
     }, auditSink);
 
     return NextResponse.json(
@@ -40,17 +48,18 @@ export async function POST(request: Request) {
     );
   }
 
-  // 2. Body parsing
+  // 3. Request body parsing
   let body: unknown;
   try {
     body = await request.json();
   } catch {
-    recordAuditEvent({
+    await recordAuditEvent({
       eventType: "postcode.lookup",
       level: "warn",
       requestId,
       clientIp,
-      organizationId: orgHeader ?? null,
+      organizationId: auth.verifiedOrgId,
+      actorId: auth.user?.id ?? null,
       statusCode: 400,
       durationMs: performance.now() - start,
       metadata: { error: "INVALID_JSON" },
@@ -64,12 +73,13 @@ export async function POST(request: Request) {
 
   const parsed = bodySchema.safeParse(body);
   if (!parsed.success) {
-    recordAuditEvent({
+    await recordAuditEvent({
       eventType: "postcode.lookup",
       level: "warn",
       requestId,
       clientIp,
-      organizationId: orgHeader ?? null,
+      organizationId: auth.verifiedOrgId,
+      actorId: auth.user?.id ?? null,
       statusCode: 400,
       durationMs: performance.now() - start,
       metadata: { error: "EMPTY_POSTCODE" },
@@ -83,12 +93,13 @@ export async function POST(request: Request) {
 
   const postcode = parsed.data.postcode.trim().toUpperCase();
   if (!looksLikeNdapsPostcode(postcode)) {
-    recordAuditEvent({
+    await recordAuditEvent({
       eventType: "postcode.lookup",
       level: "warn",
       requestId,
       clientIp,
-      organizationId: orgHeader ?? null,
+      organizationId: auth.verifiedOrgId,
+      actorId: auth.user?.id ?? null,
       statusCode: 422,
       durationMs: performance.now() - start,
       metadata: { postcodeLength: postcode.length, code: "INVALID_FORMAT" },
@@ -107,12 +118,13 @@ export async function POST(request: Request) {
     const result = await lookupPostcode(postcode);
     const durationMs = performance.now() - start;
 
-    recordAuditEvent({
+    await recordAuditEvent({
       eventType: "postcode.lookup",
       level: "info",
       requestId,
       clientIp,
-      organizationId: orgHeader ?? null,
+      organizationId: auth.verifiedOrgId,
+      actorId: auth.user?.id ?? null,
       statusCode: 200,
       durationMs,
       metadata: {
@@ -127,12 +139,13 @@ export async function POST(request: Request) {
     // Do not leak provider URLs, headers, API keys, or response bodies in errors.
     const durationMs = performance.now() - start;
 
-    recordAuditEvent({
+    await recordAuditEvent({
       eventType: "postcode.lookup",
       level: "error",
       requestId,
       clientIp,
-      organizationId: orgHeader ?? null,
+      organizationId: auth.verifiedOrgId,
+      actorId: auth.user?.id ?? null,
       statusCode: 502,
       durationMs,
       metadata: { code: "PROVIDER_UNAVAILABLE" },

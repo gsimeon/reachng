@@ -4,6 +4,7 @@ import { looksLikeNdapsPostcode } from "@/lib/postcode";
 import { parseNdapsPostcode } from "@/lib/nigeria-data";
 import { batchRateLimiter, getClientIp, resolveClientIdentity } from "@/lib/rate-limit";
 import { recordAuditEvent, getServerAuditSink } from "@/lib/audit-logger";
+import { verifyRequestAuth, toVerifiedIdentity } from "@/lib/auth-helpers";
 
 const batchSchema = z.object({
   items: z.array(z.string().max(100)).min(1).max(100),
@@ -14,23 +15,30 @@ export async function POST(request: Request) {
   const clientIp = getClientIp(request);
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
   const orgHeader = request.headers.get("x-organization-id");
-  const { identity, isAuthenticated } = resolveClientIdentity(request, orgHeader);
+
+  // 1. Authoritative identity resolution:
+  // Strictly verifies session and workspace membership before granting higher quota tier.
+  // Unauthenticated requests or spoofed organization headers are strictly assigned IP identity and base quota.
+  const auth = await verifyRequestAuth(request, orgHeader);
+  const verifiedIdentity = toVerifiedIdentity(auth);
+  const { identity, isAuthenticated } = resolveClientIdentity(request, verifiedIdentity);
   const auditSink = await getServerAuditSink();
 
-  // 1. Rate limiting enforcement (supports 5x tier for authenticated orgs)
-  const rateLimitResult = batchRateLimiter.check(identity, isAuthenticated);
+  // 2. Asynchronous rate limiting enforcement
+  const rateLimitResult = await batchRateLimiter.check(identity, isAuthenticated);
   const rateLimitHeaders = batchRateLimiter.getHeaders(rateLimitResult);
 
   if (!rateLimitResult.success) {
-    recordAuditEvent({
+    await recordAuditEvent({
       eventType: "rate_limit.exceeded",
       level: "warn",
       requestId,
       clientIp,
-      organizationId: orgHeader ?? null,
+      organizationId: auth.verifiedOrgId,
+      actorId: auth.user?.id ?? null,
       statusCode: 429,
       durationMs: performance.now() - start,
-      metadata: { route: "/api/batch", limit: rateLimitResult.limit },
+      metadata: { route: "/api/batch", limit: rateLimitResult.limit, identity },
     }, auditSink);
 
     return NextResponse.json(
@@ -43,17 +51,18 @@ export async function POST(request: Request) {
     );
   }
 
-  // 2. Body parsing
+  // 3. Request body parsing
   let body: unknown;
   try {
     body = await request.json();
   } catch {
-    recordAuditEvent({
+    await recordAuditEvent({
       eventType: "postcode.batch",
       level: "warn",
       requestId,
       clientIp,
-      organizationId: orgHeader ?? null,
+      organizationId: auth.verifiedOrgId,
+      actorId: auth.user?.id ?? null,
       statusCode: 400,
       durationMs: performance.now() - start,
       metadata: { error: "INVALID_JSON" },
@@ -67,12 +76,13 @@ export async function POST(request: Request) {
 
   const parsed = batchSchema.safeParse(body);
   if (!parsed.success) {
-    recordAuditEvent({
+    await recordAuditEvent({
       eventType: "postcode.batch",
       level: "warn",
       requestId,
       clientIp,
-      organizationId: orgHeader ?? null,
+      organizationId: auth.verifiedOrgId,
+      actorId: auth.user?.id ?? null,
       statusCode: 400,
       durationMs: performance.now() - start,
       metadata: { error: "INVALID_BATCH_SIZE" },
@@ -120,12 +130,13 @@ export async function POST(request: Request) {
   const invalidCount = results.length - validCount;
   const durationMs = performance.now() - start;
 
-  recordAuditEvent({
+  await recordAuditEvent({
     eventType: "postcode.batch",
     level: "info",
     requestId,
     clientIp,
-    organizationId: orgHeader ?? null,
+    organizationId: auth.verifiedOrgId,
+    actorId: auth.user?.id ?? null,
     statusCode: 200,
     durationMs,
     metadata: {
