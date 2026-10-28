@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { looksLikeNdapsPostcode, lookupPostcode } from "@/lib/postcode";
-import { postcodeRateLimiter, getClientIp } from "@/lib/rate-limit";
-import { recordAuditEvent } from "@/lib/audit-logger";
+import { postcodeRateLimiter, getClientIp, resolveClientIdentity } from "@/lib/rate-limit";
+import { recordAuditEvent, getServerAuditSink } from "@/lib/audit-logger";
 
 const bodySchema = z.object({ postcode: z.string().trim().min(1).max(80) });
 
@@ -10,9 +10,12 @@ export async function POST(request: Request) {
   const start = performance.now();
   const clientIp = getClientIp(request);
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
+  const orgHeader = request.headers.get("x-organization-id");
+  const { identity, isAuthenticated } = resolveClientIdentity(request, orgHeader);
+  const auditSink = await getServerAuditSink();
 
-  // 1. Rate limiting enforcement
-  const rateLimitResult = postcodeRateLimiter.check(clientIp);
+  // 1. Rate limiting enforcement (supports 5x tier for authenticated orgs)
+  const rateLimitResult = postcodeRateLimiter.check(identity, isAuthenticated);
   const rateLimitHeaders = postcodeRateLimiter.getHeaders(rateLimitResult);
 
   if (!rateLimitResult.success) {
@@ -21,10 +24,11 @@ export async function POST(request: Request) {
       level: "warn",
       requestId,
       clientIp,
+      organizationId: orgHeader ?? null,
       statusCode: 429,
       durationMs: performance.now() - start,
       metadata: { route: "/api/postcode", limit: rateLimitResult.limit },
-    });
+    }, auditSink);
 
     return NextResponse.json(
       {
@@ -46,10 +50,11 @@ export async function POST(request: Request) {
       level: "warn",
       requestId,
       clientIp,
+      organizationId: orgHeader ?? null,
       statusCode: 400,
       durationMs: performance.now() - start,
       metadata: { error: "INVALID_JSON" },
-    });
+    }, auditSink);
 
     return NextResponse.json(
       { error: "Request body must be valid JSON." },
@@ -64,10 +69,11 @@ export async function POST(request: Request) {
       level: "warn",
       requestId,
       clientIp,
+      organizationId: orgHeader ?? null,
       statusCode: 400,
       durationMs: performance.now() - start,
       metadata: { error: "EMPTY_POSTCODE" },
-    });
+    }, auditSink);
 
     return NextResponse.json(
       { error: "Enter a postcode to continue." },
@@ -82,10 +88,11 @@ export async function POST(request: Request) {
       level: "warn",
       requestId,
       clientIp,
+      organizationId: orgHeader ?? null,
       statusCode: 422,
       durationMs: performance.now() - start,
       metadata: { postcodeLength: postcode.length, code: "INVALID_FORMAT" },
-    });
+    }, auditSink);
 
     return NextResponse.json(
       {
@@ -105,6 +112,7 @@ export async function POST(request: Request) {
       level: "info",
       requestId,
       clientIp,
+      organizationId: orgHeader ?? null,
       statusCode: 200,
       durationMs,
       metadata: {
@@ -112,7 +120,7 @@ export async function POST(request: Request) {
         isAuthoritative: result.isAuthoritative,
         isSimulated: result.isSimulated,
       },
-    });
+    }, auditSink);
 
     return NextResponse.json(result, { status: 200, headers: rateLimitHeaders });
   } catch {
@@ -124,10 +132,11 @@ export async function POST(request: Request) {
       level: "error",
       requestId,
       clientIp,
+      organizationId: orgHeader ?? null,
       statusCode: 502,
       durationMs,
       metadata: { code: "PROVIDER_UNAVAILABLE" },
-    });
+    }, auditSink);
 
     return NextResponse.json(
       {

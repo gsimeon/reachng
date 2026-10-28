@@ -225,7 +225,7 @@ for insert to authenticated with check (
   user_id = (select auth.uid()) and organization_id in (select public.my_organization_ids())
 );
 
--- Audit Events: Read-only for tenant members; insert allowed for authenticated actor
+-- Audit Events: Read-only for tenant members; insert allowed for authenticated actor and anonymous system telemetry
 create policy "audit_events_select_org" on public.audit_events
 for select to authenticated using (organization_id in (select public.my_organization_ids()));
 
@@ -233,4 +233,9 @@ create policy "audit_events_insert_org" on public.audit_events
 for insert to authenticated with check (
   (actor_id = (select auth.uid()) or actor_id is null)
   and (organization_id is null or organization_id in (select public.my_organization_ids()))
+);
+
+create policy "audit_events_insert_anon" on public.audit_events
+for insert to anon with check (
+  actor_id is null and organization_id is null
 );

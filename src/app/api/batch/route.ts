@@ -2,8 +2,8 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { looksLikeNdapsPostcode } from "@/lib/postcode";
 import { parseNdapsPostcode } from "@/lib/nigeria-data";
-import { batchRateLimiter, getClientIp } from "@/lib/rate-limit";
-import { recordAuditEvent } from "@/lib/audit-logger";
+import { batchRateLimiter, getClientIp, resolveClientIdentity } from "@/lib/rate-limit";
+import { recordAuditEvent, getServerAuditSink } from "@/lib/audit-logger";
 
 const batchSchema = z.object({
   items: z.array(z.string().max(100)).min(1).max(100),
@@ -13,9 +13,12 @@ export async function POST(request: Request) {
   const start = performance.now();
   const clientIp = getClientIp(request);
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
+  const orgHeader = request.headers.get("x-organization-id");
+  const { identity, isAuthenticated } = resolveClientIdentity(request, orgHeader);
+  const auditSink = await getServerAuditSink();
 
-  // 1. Rate limiting enforcement
-  const rateLimitResult = batchRateLimiter.check(clientIp);
+  // 1. Rate limiting enforcement (supports 5x tier for authenticated orgs)
+  const rateLimitResult = batchRateLimiter.check(identity, isAuthenticated);
   const rateLimitHeaders = batchRateLimiter.getHeaders(rateLimitResult);
 
   if (!rateLimitResult.success) {
@@ -24,10 +27,11 @@ export async function POST(request: Request) {
       level: "warn",
       requestId,
       clientIp,
+      organizationId: orgHeader ?? null,
       statusCode: 429,
       durationMs: performance.now() - start,
       metadata: { route: "/api/batch", limit: rateLimitResult.limit },
-    });
+    }, auditSink);
 
     return NextResponse.json(
       {
@@ -49,10 +53,11 @@ export async function POST(request: Request) {
       level: "warn",
       requestId,
       clientIp,
+      organizationId: orgHeader ?? null,
       statusCode: 400,
       durationMs: performance.now() - start,
       metadata: { error: "INVALID_JSON" },
-    });
+    }, auditSink);
 
     return NextResponse.json(
       { error: "Request body must be valid JSON." },
@@ -67,10 +72,11 @@ export async function POST(request: Request) {
       level: "warn",
       requestId,
       clientIp,
+      organizationId: orgHeader ?? null,
       statusCode: 400,
       durationMs: performance.now() - start,
       metadata: { error: "INVALID_BATCH_SIZE" },
-    });
+    }, auditSink);
 
     return NextResponse.json(
       { error: "Provide between 1 and 100 postcode strings to validate." },
@@ -119,6 +125,7 @@ export async function POST(request: Request) {
     level: "info",
     requestId,
     clientIp,
+    organizationId: orgHeader ?? null,
     statusCode: 200,
     durationMs,
     metadata: {
@@ -126,7 +133,7 @@ export async function POST(request: Request) {
       validCount,
       invalidCount,
     },
-  });
+  }, auditSink);
 
   return NextResponse.json(
     {

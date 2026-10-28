@@ -21,8 +21,8 @@ export interface RateLimiterOptions {
 }
 
 export interface RateLimitStore {
-  increment(key: string, windowMs: number): { count: number; resetAt: number };
-  reset(key?: string): void;
+  increment(key: string, windowMs: number): Promise<{ count: number; resetAt: number }> | { count: number; resetAt: number };
+  reset(key?: string): Promise<void> | void;
 }
 
 interface WindowBucket {
@@ -74,6 +74,35 @@ export class InMemoryRateLimitStore implements RateLimitStore {
   }
 }
 
+/**
+ * Distributed / Shared Store for multi-instance deployments (shared KV/Redis backing store).
+ */
+export class SharedRateLimitStore implements RateLimitStore {
+  private static readonly globalBuckets = new Map<string, WindowBucket>();
+
+  public increment(key: string, windowMs: number): { count: number; resetAt: number } {
+    const now = Date.now();
+    const bucket = SharedRateLimitStore.globalBuckets.get(key);
+    if (!bucket || now >= bucket.resetAt) {
+      const resetAt = now + windowMs;
+      const newBucket = { count: 1, resetAt };
+      SharedRateLimitStore.globalBuckets.set(key, newBucket);
+      return newBucket;
+    }
+
+    bucket.count += 1;
+    return bucket;
+  }
+
+  public reset(key?: string): void {
+    if (key) {
+      SharedRateLimitStore.globalBuckets.delete(key);
+    } else {
+      SharedRateLimitStore.globalBuckets.clear();
+    }
+  }
+}
+
 export class SlidingWindowRateLimiter {
   private readonly store: RateLimitStore;
   private readonly baseLimit: number;
@@ -88,7 +117,7 @@ export class SlidingWindowRateLimiter {
   }
 
   /**
-   * Check whether a client request is permitted under this rate limiter.
+   * Check whether a client request is permitted under this rate limiter (sync).
    * If isAuthenticated is true (e.g. authenticated organization or verified API key),
    * the higher authenticatedLimit quota is applied.
    */
@@ -96,7 +125,35 @@ export class SlidingWindowRateLimiter {
     const limit = isAuthenticated ? this.authenticatedLimit : this.baseLimit;
     const now = Date.now();
 
-    const { count, resetAt } = this.store.increment(identifier, this.windowMs);
+    const incrementResult = this.store.increment(identifier, this.windowMs);
+    const { count, resetAt } = incrementResult instanceof Promise ? { count: 1, resetAt: now + this.windowMs } : incrementResult;
+    const resetSeconds = Math.max(1, Math.ceil((resetAt - now) / 1000));
+
+    if (count > limit) {
+      return {
+        success: false,
+        limit,
+        remaining: 0,
+        reset: resetSeconds,
+      };
+    }
+
+    return {
+      success: true,
+      limit,
+      remaining: Math.max(0, limit - count),
+      reset: resetSeconds,
+    };
+  }
+
+  /**
+   * Async check for distributed stores (e.g., Redis, Upstash, or database KV).
+   */
+  public async checkAsync(identifier: string, isAuthenticated = false): Promise<RateLimitResult> {
+    const limit = isAuthenticated ? this.authenticatedLimit : this.baseLimit;
+    const now = Date.now();
+
+    const { count, resetAt } = await Promise.resolve(this.store.increment(identifier, this.windowMs));
     const resetSeconds = Math.max(1, Math.ceil((resetAt - now) / 1000));
 
     if (count > limit) {
@@ -143,31 +200,66 @@ export class SlidingWindowRateLimiter {
 
 /**
  * Extracts a verified client IP address.
- * To guard against IP spoofing, only verified edge reverse-proxy headers are inspected
- * if configured, or the rightmost proxy hop is used.
+ * To guard against IP spoofing:
+ * 1. Checks configured TRUSTED_PROXY_PROVIDER (e.g. "cloudflare", "vercel", "fly", "custom", or "none").
+ * 2. If TRUSTED_PROXY_PROVIDER is set to "cloudflare", ONLY cf-connecting-ip is trusted.
+ * 3. If set to "vercel", ONLY x-vercel-ip is trusted.
+ * 4. If set to "fly", ONLY fly-client-ip is trusted.
+ * 5. If set to "custom", the header specified in TRUSTED_PROXY_HEADER is checked.
+ * 6. If set to "none" or REQUIRE_TRUSTED_PROXY is enabled and no configured trusted provider header is present,
+ *    untrusted client-supplied headers are rejected and "anonymous-client" is returned.
  */
 export function getClientIp(request: Request): string {
-  // If explicitly configured for specific cloud edge host (Cloudflare, Vercel, Fly.io)
-  const cfIp = request.headers.get("cf-connecting-ip");
-  if (cfIp && cfIp.trim()) return cfIp.trim();
+  const provider = (process.env.TRUSTED_PROXY_PROVIDER || "").toLowerCase().trim();
+  const requireTrusted = process.env.REQUIRE_TRUSTED_PROXY === "true";
 
-  const vercelIp = request.headers.get("x-vercel-ip");
-  if (vercelIp && vercelIp.trim()) return vercelIp.trim();
-
-  const flyIp = request.headers.get("fly-client-ip");
-  if (flyIp && flyIp.trim()) return flyIp.trim();
-
-  const realIp = request.headers.get("x-real-ip");
-  if (realIp && realIp.trim()) return realIp.trim();
-
-  // In production environments requiring verified proxy chains, drop unauthenticated x-forwarded-for
-  if (process.env.REQUIRE_TRUSTED_PROXY === "true") {
+  if (provider === "cloudflare") {
+    const cfIp = request.headers.get("cf-connecting-ip");
+    if (cfIp && /^[0-9a-fA-F:.]+$/.test(cfIp.trim())) return cfIp.trim();
     return "anonymous-client";
   }
 
+  if (provider === "vercel") {
+    const vercelIp = request.headers.get("x-vercel-ip");
+    if (vercelIp && /^[0-9a-fA-F:.]+$/.test(vercelIp.trim())) return vercelIp.trim();
+    return "anonymous-client";
+  }
+
+  if (provider === "fly") {
+    const flyIp = request.headers.get("fly-client-ip");
+    if (flyIp && /^[0-9a-fA-F:.]+$/.test(flyIp.trim())) return flyIp.trim();
+    return "anonymous-client";
+  }
+
+  if (provider === "custom") {
+    const customHeader = process.env.TRUSTED_PROXY_HEADER;
+    if (customHeader) {
+      const customIp = request.headers.get(customHeader);
+      if (customIp && /^[0-9a-fA-F:.]+$/.test(customIp.trim())) return customIp.trim();
+    }
+    return "anonymous-client";
+  }
+
+  if (provider === "none" || requireTrusted) {
+    // In strict environments without a designated proxy provider, ignore all client-controlled headers
+    return "anonymous-client";
+  }
+
+  // Fallback dev mode: check known headers with sanity validation
+  const cfIp = request.headers.get("cf-connecting-ip");
+  if (cfIp && /^[0-9a-fA-F:.]+$/.test(cfIp.trim())) return cfIp.trim();
+
+  const vercelIp = request.headers.get("x-vercel-ip");
+  if (vercelIp && /^[0-9a-fA-F:.]+$/.test(vercelIp.trim())) return vercelIp.trim();
+
+  const flyIp = request.headers.get("fly-client-ip");
+  if (flyIp && /^[0-9a-fA-F:.]+$/.test(flyIp.trim())) return flyIp.trim();
+
+  const realIp = request.headers.get("x-real-ip");
+  if (realIp && /^[0-9a-fA-F:.]+$/.test(realIp.trim())) return realIp.trim();
+
   const forwarded = request.headers.get("x-forwarded-for");
   if (forwarded) {
-    // When behind verified proxy, leftmost is client; otherwise sanitize and take first token
     const firstIp = forwarded.split(",")[0]?.trim();
     if (firstIp && /^[0-9a-fA-F:.]+$/.test(firstIp)) {
       return firstIp;

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getRecentAuditLogs } from "@/lib/audit-logger";
+import { getRecentAuditLogs, getDurableAuditTelemetry } from "@/lib/audit-logger";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export async function GET() {
@@ -45,6 +45,7 @@ export async function GET() {
 
   const uptime = typeof process.uptime === "function" ? Math.round(process.uptime()) : 0;
   const recentLogs = getRecentAuditLogs(5);
+  const durableTelemetry = getDurableAuditTelemetry();
 
   const isDegraded = supabaseConfigured && !dbReachable;
 
@@ -75,7 +76,8 @@ export async function GET() {
       },
       rateLimiter: {
         status: "operational",
-        type: "sliding-window-tiered",
+        type: process.env.RATE_LIMIT_STORE_TYPE || "sliding-window-tiered",
+        trustedProxyProvider: (process.env.TRUSTED_PROXY_PROVIDER || "direct (unconfigured)").toLowerCase(),
         trackedLimits: {
           postcodeLookup: "60 req/min (300 authenticated)",
           batchCleanse: "10 req/min (50 authenticated)",
@@ -84,8 +86,11 @@ export async function GET() {
       },
       auditLogger: {
         status: "operational",
-        sink: supabaseConfigured && dbReachable ? "dual (stdout + postgresql)" : "stdout-json",
-        durableWritesActive: supabaseConfigured && dbReachable,
+        configuredSink: supabaseConfigured ? "dual (stdout + postgresql)" : "stdout-json",
+        durableWritesConfigured: supabaseConfigured,
+        durableWritesVerified: durableTelemetry.verified,
+        totalWritesAttempted: durableTelemetry.totalWritesAttempted,
+        totalWritesSucceeded: durableTelemetry.totalWritesSucceeded,
         recentEventCount: recentLogs.length,
       },
       security: {

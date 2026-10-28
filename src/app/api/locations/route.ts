@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { locationsRateLimiter, getClientIp } from "@/lib/rate-limit";
+import { locationsRateLimiter, getClientIp, resolveClientIdentity } from "@/lib/rate-limit";
 import { recordAuditEvent } from "@/lib/audit-logger";
 
 const locationSchema = z.object({
@@ -16,8 +16,11 @@ export async function GET(request: Request) {
   const start = performance.now();
   const clientIp = getClientIp(request);
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
+  const { searchParams } = new URL(request.url);
+  const targetOrgId = searchParams.get("organization_id") || request.headers.get("x-organization-id");
+  const { identity, isAuthenticated } = resolveClientIdentity(request, targetOrgId);
 
-  const rateLimitResult = locationsRateLimiter.check(clientIp);
+  const rateLimitResult = locationsRateLimiter.check(identity, isAuthenticated);
   const rateLimitHeaders = locationsRateLimiter.getHeaders(rateLimitResult);
 
   if (!rateLimitResult.success) {
@@ -26,6 +29,7 @@ export async function GET(request: Request) {
       level: "warn",
       requestId,
       clientIp,
+      organizationId: targetOrgId ?? null,
       statusCode: 429,
       durationMs: performance.now() - start,
       metadata: { route: "/api/locations [GET]", limit: rateLimitResult.limit },
@@ -41,9 +45,6 @@ export async function GET(request: Request) {
   if (!supabase) return NextResponse.json({ error: "Supabase is not configured." }, { status: 503, headers: rateLimitHeaders });
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Sign in to view saved locations." }, { status: 401, headers: rateLimitHeaders });
-
-  const { searchParams } = new URL(request.url);
-  const targetOrgId = searchParams.get("organization_id") || request.headers.get("x-organization-id");
 
   let query = supabase
     .from("locations")
@@ -92,8 +93,10 @@ export async function POST(request: Request) {
   const start = performance.now();
   const clientIp = getClientIp(request);
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
+  const orgHeader = request.headers.get("x-organization-id");
+  const { identity, isAuthenticated } = resolveClientIdentity(request, orgHeader);
 
-  const rateLimitResult = locationsRateLimiter.check(clientIp);
+  const rateLimitResult = locationsRateLimiter.check(identity, isAuthenticated);
   const rateLimitHeaders = locationsRateLimiter.getHeaders(rateLimitResult);
 
   if (!rateLimitResult.success) {
@@ -102,6 +105,7 @@ export async function POST(request: Request) {
       level: "warn",
       requestId,
       clientIp,
+      organizationId: orgHeader ?? null,
       statusCode: 429,
       durationMs: performance.now() - start,
       metadata: { route: "/api/locations [POST]", limit: rateLimitResult.limit },
@@ -191,8 +195,10 @@ export async function DELETE(request: Request) {
   const start = performance.now();
   const clientIp = getClientIp(request);
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
+  const orgHeader = request.headers.get("x-organization-id");
+  const { identity, isAuthenticated } = resolveClientIdentity(request, orgHeader);
 
-  const rateLimitResult = locationsRateLimiter.check(clientIp);
+  const rateLimitResult = locationsRateLimiter.check(identity, isAuthenticated);
   const rateLimitHeaders = locationsRateLimiter.getHeaders(rateLimitResult);
 
   if (!rateLimitResult.success) {

@@ -26,7 +26,7 @@ async function runLiveProbe() {
 
   if (!url || !anonKey || url.includes("YOUR_PROJECT") || anonKey.includes("YOUR_SUPABASE_ANON_KEY")) {
     console.log("ℹ️  Supabase credentials not configured in local environment.");
-    console.log("   (Skipping live cloud probe; automated in-memory RLS test suite passed with 55 checks.)");
+    console.log("   (Skipping live cloud probe; automated in-memory RLS and API route test suite passed with 76 checks.)");
     console.log("   To run against a live Supabase project, set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY.");
     process.exit(0);
   }

@@ -415,12 +415,18 @@ describe("System Health & Diagnostic Telemetry Schema", () => {
       rateLimiter: z.object({
         status: z.literal("operational"),
         type: z.string(),
+        trustedProxyProvider: z.string().optional(),
         trackedLimits: z.record(z.string()),
       }),
       auditLogger: z.object({
         status: z.literal("operational"),
-        sink: z.string(),
+        sink: z.string().optional(),
+        configuredSink: z.string().optional(),
         durableWritesActive: z.boolean().optional(),
+        durableWritesConfigured: z.boolean().optional(),
+        durableWritesVerified: z.boolean().optional(),
+        totalWritesAttempted: z.number().optional(),
+        totalWritesSucceeded: z.number().optional(),
         recentEventCount: z.number().nonnegative(),
       }),
       security: z.object({
@@ -458,6 +464,7 @@ describe("System Health & Diagnostic Telemetry Schema", () => {
         rateLimiter: {
           status: "operational",
           type: "sliding-window-tiered",
+          trustedProxyProvider: "direct (unconfigured)",
           trackedLimits: {
             postcodeLookup: "60 req/min (300 authenticated)",
             batchCleanse: "10 req/min (50 authenticated)",
@@ -466,8 +473,11 @@ describe("System Health & Diagnostic Telemetry Schema", () => {
         },
         auditLogger: {
           status: "operational",
-          sink: "dual (stdout + postgresql)",
-          durableWritesActive: true,
+          configuredSink: "dual (stdout + postgresql)",
+          durableWritesConfigured: true,
+          durableWritesVerified: true,
+          totalWritesAttempted: 12,
+          totalWritesSucceeded: 12,
           recentEventCount: 12,
         },
         security: {

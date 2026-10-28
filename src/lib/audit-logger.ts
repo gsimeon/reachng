@@ -99,11 +99,57 @@ export interface DurableAuditSink {
   };
 }
 
+export interface DurableAuditTelemetry {
+  configured: boolean;
+  verified: boolean;
+  totalWritesAttempted: number;
+  totalWritesSucceeded: number;
+  lastWriteAt?: string;
+  lastError?: string;
+}
+
+const durableTelemetry: DurableAuditTelemetry = {
+  configured: false,
+  verified: false,
+  totalWritesAttempted: 0,
+  totalWritesSucceeded: 0,
+};
+
+/**
+ * Resolve server-side durable audit sink.
+ * Uses SUPABASE_SERVICE_ROLE_KEY if available for tamper-evident server-side writes,
+ * or falls back to server client with user/anon session.
+ */
+export async function getServerAuditSink(): Promise<DurableAuditSink | null> {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (url && serviceKey && !url.includes("YOUR_PROJECT") && !serviceKey.includes("YOUR_SERVICE_KEY")) {
+    try {
+      const { createClient } = await import("@supabase/supabase-js");
+      return createClient(url, serviceKey, {
+        auth: { persistSession: false, autoRefreshToken: false },
+      });
+    } catch {
+      // Fallback below
+    }
+  }
+
+  try {
+    const { createSupabaseServerClient } = await import("@/lib/supabase/server");
+    const client = await createSupabaseServerClient();
+    return client;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Record a structured audit event.
  * If a durable sink (Supabase client) is provided, also attempts to persist to public.audit_events.
+ * Updates durable audit telemetry to make persistence and failures observable.
  */
-export function recordAuditEvent(event: AuditEventPayload, durableSink?: DurableAuditSink): StructuredAuditLog {
+export function recordAuditEvent(event: AuditEventPayload, durableSink?: DurableAuditSink | null): StructuredAuditLog {
   const log: StructuredAuditLog = {
     timestamp: new Date().toISOString(),
     level:
@@ -147,6 +193,9 @@ export function recordAuditEvent(event: AuditEventPayload, durableSink?: Durable
 
   // Durable sink write to PostgreSQL audit_events (non-blocking async)
   if (durableSink) {
+    durableTelemetry.configured = true;
+    durableTelemetry.totalWritesAttempted += 1;
+
     Promise.resolve(
       durableSink.from("audit_events").insert({
         organization_id: log.organizationId,
@@ -164,11 +213,23 @@ export function recordAuditEvent(event: AuditEventPayload, durableSink?: Durable
     )
       .then((res) => {
         const potentialError = (res as { error?: unknown })?.error;
-        if (potentialError && process.env.NODE_ENV !== "test") {
-          console.warn("[audit-logger] Warning: durable sink write returned error:", potentialError);
+        if (potentialError) {
+          durableTelemetry.lastError =
+            typeof potentialError === "object" && potentialError !== null && "message" in potentialError
+              ? String((potentialError as { message: unknown }).message)
+              : String(potentialError);
+          if (process.env.NODE_ENV !== "test") {
+            console.warn("[audit-logger] Warning: durable sink write returned error:", potentialError);
+          }
+        } else {
+          durableTelemetry.verified = true;
+          durableTelemetry.totalWritesSucceeded += 1;
+          durableTelemetry.lastWriteAt = new Date().toISOString();
+          durableTelemetry.lastError = undefined;
         }
       })
       .catch((err) => {
+        durableTelemetry.lastError = err instanceof Error ? err.message : String(err);
         if (process.env.NODE_ENV !== "test") {
           console.warn("[audit-logger] Warning: durable sink write failed:", err instanceof Error ? err.message : err);
         }
@@ -179,6 +240,13 @@ export function recordAuditEvent(event: AuditEventPayload, durableSink?: Durable
 }
 
 /**
+ * Retrieve durable audit telemetry (for health diagnostics and observability).
+ */
+export function getDurableAuditTelemetry(): DurableAuditTelemetry {
+  return { ...durableTelemetry };
+}
+
+/**
  * Retrieve recent telemetry logs (for health/diagnostics inspection).
  */
 export function getRecentAuditLogs(limit = 20): StructuredAuditLog[] {
@@ -186,8 +254,14 @@ export function getRecentAuditLogs(limit = 20): StructuredAuditLog[] {
 }
 
 /**
- * Clear the audit log buffer (for unit test isolation).
+ * Clear the audit log buffer and telemetry (for unit test isolation).
  */
 export function clearAuditLogBuffer(): void {
   auditLogBuffer.length = 0;
+  durableTelemetry.configured = false;
+  durableTelemetry.verified = false;
+  durableTelemetry.totalWritesAttempted = 0;
+  durableTelemetry.totalWritesSucceeded = 0;
+  durableTelemetry.lastWriteAt = undefined;
+  durableTelemetry.lastError = undefined;
 }
